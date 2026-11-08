@@ -18,6 +18,7 @@ members = [
     "ignite/server/scribe-server",
     "ignite/tools/scribe-sync-tool",
     "ignite/tools/backup-export",
+    "ignite/tools/ignite-import",
 ]
 default-members = [
     "ignite/core/notebook-core",
@@ -37,6 +38,7 @@ default-members = [
     "ignite/server/scribe-server",
     "ignite/tools/scribe-sync-tool",
     "ignite/tools/backup-export",
+    "ignite/tools/ignite-import",
 ]
 
 [workspace.package]

@@ -645,6 +645,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignite-import"
+version = "0.9.14"
+dependencies = [
+ "fontdue",
+ "scribe-sync-server",
+ "serde",
+ "serde_json",
+ "sync-engine",
+ "sync-protocol",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

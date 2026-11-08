@@ -1,0 +1,26 @@
+[package]
+name = "ignite-import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Create Ignite notebooks from a simple page-spec JSON by posting validated sync operations"
+
+[lib]
+name = "ignite_import"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ignite-import"
+path = "src/main.rs"
+
+[dependencies]
+sync-protocol = { workspace = true, features = ["mint"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", default-features = false, features = ["std", "v7"] }
+ureq = { version = "2", default-features = false }
+fontdue = { version = "0.9", default-features = false }
+
+[dev-dependencies]
+scribe-sync-server = { workspace = true }
+sync-engine = { workspace = true, features = ["testkit"] }

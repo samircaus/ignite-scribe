@@ -1,0 +1,18 @@
+{
+  "notebook": { "title": "Ignite PoC" },
+  "pages": [
+    {
+      "paper": "blank",
+      "labels": [
+        { "text": "MY FIRST IMPORT", "x": 0.08, "y": 0.09, "size": 0.045 },
+        { "text": "Write below", "x": 0.08, "y": 0.62, "size": 0.025 }
+      ],
+      "shapes": [
+        { "kind": "rect",    "x": 0.08, "y": 0.22, "w": 0.26, "h": 0.12 },
+        { "kind": "arrow",   "from": [0.34, 0.28], "to": [0.52, 0.28] },
+        { "kind": "ellipse", "cx": 0.72, "cy": 0.28, "rx": 0.17, "ry": 0.09 },
+        { "kind": "line",    "from": [0.08, 0.57], "to": [0.92, 0.57] }
+      ]
+    }
+  ]
+}
