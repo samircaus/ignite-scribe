@@ -30,6 +30,8 @@ kindle_supervisor_harness = []
 # (tools/docker_build_armv7hf.sh). Builds without it hide the action; startup recovery of an
 # interrupted adoption is always built in.
 restore_from_server = []
+# Phase-1 in-app PDF reader. MuPDF and its C dependencies are absent from ordinary builds.
+reader = ["dep:mupdf"]
 
 [dependencies]
 notebook-core = { workspace = true, features = ["mint"] }
@@ -48,6 +50,7 @@ control-protocol = { workspace = true }
 mdns-sd = { version = "0.21", default-features = false }
 # Display-only page text: pure-Rust TTF raster (no FreeType / Kindle system fonts).
 fontdue = { version = "0.9", default-features = false }
+mupdf = { version = "0.8.0", optional = true, default-features = false, features = ["epub", "html", "img", "svg", "cbz", "base14-fonts"] }
 
 [dev-dependencies]
 # Host-side integration tests (never linked into the Kindle binary).

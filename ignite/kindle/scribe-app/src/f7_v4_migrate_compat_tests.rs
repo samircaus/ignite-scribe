@@ -290,8 +290,14 @@ mod tests {
 
         let curve_h = from_hist.pressure.unwrap();
         let curve_s = sealed.pressure.unwrap();
-        assert_eq!(radius_for_pressure(curve_h, None), LEGACY_FIXED_RADIUS);
-        assert_eq!(radius_for_pressure(curve_s, None), LEGACY_FIXED_RADIUS);
+        assert_eq!(
+            radius_for_pressure(curve_h, None),
+            LEGACY_FIXED_RADIUS + crate::render::DISPLAY_WIDTH_BOOST
+        );
+        assert_eq!(
+            radius_for_pressure(curve_s, None),
+            LEGACY_FIXED_RADIUS + crate::render::DISPLAY_WIDTH_BOOST
+        );
 
         let stroke = Stroke {
             id: StrokeId::new("s-miss"),

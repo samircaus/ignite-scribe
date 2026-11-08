@@ -44,7 +44,7 @@ use crate::fullscreen::{
     compose_notebook_layers, recompose_dirty_notebook_layers,
     recompose_dirty_notebook_layers_translated,
 };
-use crate::home::{home_cards, render_home_view, AppView, HomeCard, HomeState};
+use crate::home::{home_cards, render_home_view, AppView, HomeCard, HomeCovers, HomeState};
 use crate::ink::parse_ink_request;
 use crate::ink::InkRequest;
 use crate::keyboard::render_title_editor;
@@ -79,6 +79,8 @@ use crate::orch::{
 use crate::prefs::{self, SideButtonAction};
 use crate::pressure::PressureStrokeSummary;
 use crate::profile::RenderProfile;
+#[cfg(feature = "reader")]
+use crate::reader::{ReaderRuntime, ReaderSession, ReaderUiState, POSITIONS_FILE};
 use crate::store::{page_dir, resolve_data_dir, PageStore, RuntimeStore, DEFAULT_PAGE_ID};
 use crate::text_paint::TextOverlay;
 use crate::touch::{
@@ -113,7 +115,15 @@ pub struct KindleTransport {
     lasso_dash_phase: u32,
     /// True after the first lasso segment of the current gesture (skip join pixels).
     lasso_dash_started: bool,
+    /// Library/reader screen on the panel ("home:…", "books", "reader:…"); `None` after any
+    /// other full present. Same screen again (page turn, menu) refreshes without a flash.
+    last_screen: Option<String>,
+    /// Flash-free refreshes since the last full (cleaning) flash.
+    soft_refreshes: u32,
 }
+
+/// Every Nth page turn on the same screen is a full GC16 flash that clears e-ink ghosting.
+const SOFT_REFRESHES_PER_CLEAN: u32 = 6;
 
 impl KindleTransport {
     pub fn new(fb: MappedFramebuffer, profile: RenderProfile) -> Self {
@@ -127,6 +137,8 @@ impl KindleTransport {
             chrome_title: String::new(),
             chrome_layout: ChromeLayout::new(&geometry),
             chrome_damaged: false,
+            last_screen: None,
+            soft_refreshes: 0,
             chrome_visible: false,
             chrome_on_panel: false,
             text_overlay: TextOverlay::empty(),
@@ -188,8 +200,33 @@ impl KindleTransport {
         })
     }
 
+    /// Refresh a library/reader screen identified by `key`. Entering it flashes (GC16 FULL)
+    /// so no earlier view ghosts through; turning pages or opening a menu on the same screen
+    /// uses plain GC16 (no black flash), with a cleaning flash every
+    /// `SOFT_REFRESHES_PER_CLEAN` turns. Returns whether this refresh flashed.
+    fn refresh_screen(&mut self, key: String) -> Result<bool, String> {
+        let same = self.last_screen.as_deref() == Some(key.as_str());
+        let flash = !same || self.soft_refreshes + 1 >= SOFT_REFRESHES_PER_CLEAN;
+        if flash {
+            self.refresh_full()?;
+            self.soft_refreshes = 0;
+        } else {
+            let full = Rect::new(0, 0, self.geometry.xres, self.geometry.yres);
+            self.refresh_rect(full)?;
+            self.soft_refreshes += 1;
+        }
+        self.last_screen = Some(key);
+        Ok(flash)
+    }
+
+    /// The panel no longer shows the last library/reader screen (e.g. a screensaver).
+    pub fn forget_screen(&mut self) {
+        self.last_screen = None;
+    }
+
     /// GC16 FULL of the whole panel (mode transitions: no ghosted Home/modal remnants).
     fn refresh_full(&mut self) -> Result<(u32, u32), String> {
+        self.last_screen = None;
         let mx = self.full_rect()?;
         let r = self
             .fb
@@ -264,6 +301,7 @@ impl KindleTransport {
         open_folder: Option<&str>,
         state: &HomeState,
         modal: Option<&Modal>,
+        covers: &HomeCovers,
     ) -> Result<(), String> {
         self.chrome_on_panel = false;
         let summary = render_home_view(
@@ -273,15 +311,16 @@ impl KindleTransport {
             folders,
             open_folder,
             state,
+            covers,
         )?;
         if let Some(spec) = modal.and_then(dialog_spec) {
             render_dialog(self.fb.as_slice_mut(), &self.geometry, &spec)?;
         }
         let gc16_t0 = Instant::now();
-        let (marker, collision) = self.refresh_full()?;
+        let flash = self.refresh_screen(format!("home:{}", open_folder.unwrap_or("")))?;
         let gc16_ms = gc16_t0.elapsed().as_millis();
         println!(
-            "home_gc16_full marker={marker} collision={collision} gc16_ms={gc16_ms} folders={} open_folder={} visible_entries={} total_entries={} selected_index={} viewport_page={}/{} modal={}",
+            "home_present flash={flash} gc16_ms={gc16_ms} folders={} open_folder={} visible_entries={} total_entries={} selected_index={} viewport_page={}/{} modal={}",
             folders.len(),
             open_folder.unwrap_or("-"),
             summary.visible_entries,
@@ -290,6 +329,49 @@ impl KindleTransport {
             summary.viewport_page + 1,
             summary.viewport_pages,
             modal.is_some(),
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "reader")]
+    fn render_books(&mut self, state: &ReaderUiState, modal: Option<&Modal>) -> Result<(), String> {
+        self.chrome_on_panel = false;
+        crate::reader::render_books(self.fb.as_slice_mut(), &self.geometry, state)?;
+        if let Some(spec) = modal.and_then(dialog_spec) {
+            render_dialog(self.fb.as_slice_mut(), &self.geometry, &spec)?;
+        }
+        let flash = self.refresh_screen("books".into())?;
+        println!(
+            "books_present flash={flash} books={} page={}/{} modal={}",
+            state.books.len(),
+            state.page + 1,
+            state.page_count(),
+            modal.is_some()
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "reader")]
+    fn render_reader(
+        &mut self,
+        session: &mut ReaderSession,
+        modal: Option<&Modal>,
+    ) -> Result<(), String> {
+        self.chrome_on_panel = true;
+        let timing = session.render(self.fb.as_slice_mut(), &self.geometry)?;
+        if let Some(spec) = modal.and_then(dialog_spec) {
+            render_dialog(self.fb.as_slice_mut(), &self.geometry, &spec)?;
+        }
+        let flash = self.refresh_screen(format!("reader:{}", session.entry.path.display()))?;
+        println!(
+            "reader_present flash={flash} file={:?} page={}/{} render_ms={:.1} pixmap={}x{} modal={}",
+            session.entry.path,
+            session.page(),
+            session.pages(),
+            timing.render_ms,
+            timing.pixmap_width,
+            timing.pixmap_height,
+            modal.is_some()
         );
         Ok(())
     }
@@ -431,6 +513,7 @@ impl KindleTransport {
         self.compose_page(background, strokes, chrome)?;
         let reconstruct_us = t0.elapsed().as_micros() as u64;
         let t1 = Instant::now();
+        self.last_screen = None;
         let mx = self.full_rect()?;
         let r = self
             .fb
@@ -464,6 +547,99 @@ impl KindleTransport {
             self.chrome_on_panel
         );
         Ok(())
+    }
+
+    /// Show or hide the chrome without a full-screen flash: recompose the page (durable
+    /// background + strokes + text + live chrome) and refresh only the two bands, the only
+    /// pixels that differ between chrome on and off.
+    fn present_chrome_bands(
+        &mut self,
+        background: &[u8],
+        strokes: &[Stroke],
+        chrome: PageChrome,
+    ) -> Result<(), String> {
+        let t0 = Instant::now();
+        self.compose_page(background, strokes, Some(chrome))?;
+        let layout = crate::chrome::ChromeLayout::new(&self.geometry);
+        // Send both bands, then wait for both: one waveform period instead of two.
+        let mut markers = Vec::with_capacity(2);
+        for band in [layout.top_band, layout.bottom_band] {
+            let Some(r) = band.clamp_to(&self.geometry) else {
+                continue;
+            };
+            let mx = MxcfbRect {
+                top: r.y,
+                left: r.x,
+                width: r.w,
+                height: r.h,
+            };
+            markers.push(
+                self.fb
+                    .send_update_gc16(mx)
+                    .map_err(|e| e.to_string())?
+                    .marker,
+            );
+        }
+        for marker in markers {
+            self.fb.wait_for_update(marker).map_err(|e| e.to_string())?;
+        }
+        println!(
+            "chrome_bands_presented visible={} page=\"{}\" elapsed_us={}",
+            self.chrome_on_panel,
+            chrome.label(),
+            t0.elapsed().as_micros()
+        );
+        Ok(())
+    }
+
+    /// Panel rectangle covering `strokes` (ink radius + antialiasing padded), or `None` when
+    /// nothing maps to the panel.
+    fn strokes_panel_rect(&self, strokes: &[&Stroke], pad: u32) -> Option<Rect> {
+        let mut bounds: Option<(i32, i32, i32, i32)> = None;
+        for stroke in strokes {
+            for p in &stroke.points {
+                let Some((x, y)) = self.to_panel(PagePoint::new(p.x, p.y)) else {
+                    continue;
+                };
+                bounds = Some(match bounds {
+                    None => (x, y, x, y),
+                    Some((a, b, c, d)) => (a.min(x), b.min(y), c.max(x), d.max(y)),
+                });
+            }
+        }
+        let (x0, y0, x1, y1) = bounds?;
+        let pad = pad as i32;
+        let x0 = (x0 - pad).max(0) as u32;
+        let y0 = (y0 - pad).max(0) as u32;
+        Rect::new(
+            x0,
+            y0,
+            (x1 + pad) as u32 - x0 + 1,
+            (y1 + pad) as u32 - y0 + 1,
+        )
+        .clamp_to(&self.geometry)
+    }
+
+    /// Recompose the page and refresh only `region` (partial GC16, waited): e.g. the area an
+    /// erase gesture changed, instead of a full-screen flash.
+    fn present_region(
+        &mut self,
+        background: &[u8],
+        strokes: &[Stroke],
+        chrome: PageChrome,
+        region: Rect,
+    ) -> Result<(u64, u64), String> {
+        let t0 = Instant::now();
+        self.compose_page(background, strokes, Some(chrome))?;
+        let reconstruct_us = t0.elapsed().as_micros() as u64;
+        let t1 = Instant::now();
+        self.refresh_rect(region)?;
+        let refresh_us = t1.elapsed().as_micros() as u64;
+        println!(
+            "region_present x={} y={} w={} h={} reconstruct_us={reconstruct_us} refresh_us={refresh_us}",
+            region.x, region.y, region.w, region.h
+        );
+        Ok((reconstruct_us, refresh_us))
     }
 
     /// Repaint chrome bands after live ink crossed them (idle + disarmed only).
@@ -805,7 +981,7 @@ impl InkTransport for KindleTransport {
                 px,
                 py,
                 ink,
-                self.profile.brush_radius,
+                self.profile.brush_radius + crate::render::DISPLAY_WIDTH_BOOST,
             )
             .map_err(|e| format!("{e:?}"))?,
         };
@@ -848,7 +1024,7 @@ impl InkTransport for KindleTransport {
                 x1,
                 y1,
                 ink,
-                self.profile.brush_radius,
+                self.profile.brush_radius + crate::render::DISPLAY_WIDTH_BOOST,
             )
             .map_err(|e| format!("{e:?}"))?,
         };
@@ -1157,6 +1333,22 @@ fn eraser_commit_gesture(
         return Ok(());
     }
     let t0 = Instant::now();
+    // Panel area the gesture changes: the touched strokes as they were (fragments lie inside).
+    let region = {
+        let targets: HashSet<&str> = commit
+            .replacements
+            .iter()
+            .map(|r| r.target_stroke_id.as_str())
+            .collect();
+        let touched: Vec<&Stroke> = ctrl
+            .session
+            .committed_strokes()
+            .iter()
+            .filter(|s| targets.contains(s.id.as_str()))
+            .collect();
+        // Widest pen radius is 4 px; leave room for antialiasing and ghosting.
+        ctrl.transport().strokes_panel_rect(&touched, 16)
+    };
     let timing = ctrl
         .durable_replace_strokes(&commit.replacements)
         .map_err(|e| {
@@ -1173,13 +1365,20 @@ fn eraser_commit_gesture(
     ctrl.totals.partial_erase_fragments_created += commit.stats.fragments_created;
 
     let remaining: Vec<Stroke> = ctrl.session.committed_strokes().to_vec();
-    match ctrl
-        .transport_mut()
-        .reconstruct_page(current_bg, &remaining, Some(chrome))
-    {
+    let presented = match region {
+        Some(r) => ctrl
+            .transport_mut()
+            .present_region(current_bg, &remaining, chrome, r),
+        None => ctrl
+            .transport_mut()
+            .reconstruct_page(current_bg, &remaining, Some(chrome)),
+    };
+    match presented {
         Ok((reconstruct_us, gc16_us)) => {
             ctrl.totals.eraser_reconstructs += 1;
-            ctrl.clear_pending_clean();
+            if region.is_none() {
+                ctrl.clear_pending_clean();
+            }
             let _ = t0;
             println!(
                 "partial_erase_gesture sweeps={} source_strokes_touched={} \
@@ -1213,6 +1412,8 @@ fn navigate(
     current_bg: &mut Vec<u8>,
     action: NavDownAction,
 ) -> Result<bool, String> {
+    // A lingering wet path (see `orch::LINGER_SETTLE_US`) settles before any other action.
+    ctrl.settle().map_err(|e| format!("settle: {e}"))?;
     if !ctrl.is_idle() || ctrl.life().is_armed() {
         // Mid-stroke: ignore navigation.
         return Ok(false);
@@ -1405,6 +1606,8 @@ fn delete_current_page(
     notebook_profile: &RenderProfile,
     current_bg: &mut Vec<u8>,
 ) -> Result<bool, String> {
+    // A lingering wet path (see `orch::LINGER_SETTLE_US`) settles before any other action.
+    ctrl.settle().map_err(|e| format!("settle: {e}"))?;
     if !ctrl.is_idle() || ctrl.life().is_armed() {
         println!("page_delete_ignored reason=not_idle");
         return Ok(false);
@@ -1505,6 +1708,8 @@ fn move_current_page(
     current_bg: &[u8],
     direction: MovePageDirection,
 ) -> Result<bool, String> {
+    // A lingering wet path (see `orch::LINGER_SETTLE_US`) settles before any other action.
+    ctrl.settle().map_err(|e| format!("settle: {e}"))?;
     if !ctrl.is_idle() || ctrl.life().is_armed() {
         println!("page_move_ignored reason=not_idle");
         return Ok(false);
@@ -1572,6 +1777,8 @@ fn insert_page_after_current(
     notebook_profile: &RenderProfile,
     current_bg: &mut Vec<u8>,
 ) -> Result<bool, String> {
+    // A lingering wet path (see `orch::LINGER_SETTLE_US`) settles before any other action.
+    ctrl.settle().map_err(|e| format!("settle: {e}"))?;
     if !ctrl.is_idle() || ctrl.life().is_armed() {
         println!("page_insert_ignored reason=not_idle");
         return Ok(false);
@@ -1928,6 +2135,8 @@ fn handle_lasso_action(
     cached_move_ids: &mut Option<HashSet<String>>,
     frame_diag: Option<TouchFrameDiag>,
 ) -> Result<bool, String> {
+    // A lingering wet path (see `orch::LINGER_SETTLE_US`) settles before any other action.
+    ctrl.settle().map_err(|e| format!("settle: {e}"))?;
     match action {
         FingerAction::Tap(_) | FingerAction::NextPage | FingerAction::PreviousPage => {
             return Ok(false)
@@ -2135,6 +2344,23 @@ fn undo_and_present(
         .session
         .last_committed_stroke_id()
         .map(|id| ctrl.session.root_id_of(id));
+    // Pixels the undo changes: the visible strokes of that lineage. Refreshing only them (as
+    // the eraser does) avoids a full-screen GC16 flash on every undo.
+    let region = undo_root.as_ref().and_then(|root| {
+        let ids: HashSet<String> = ctrl
+            .session
+            .visible_ids_for_root(root)
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        let touched: Vec<&Stroke> = ctrl
+            .session
+            .committed_strokes()
+            .iter()
+            .filter(|s| ids.contains(s.id.as_str()))
+            .collect();
+        ctrl.transport().strokes_panel_rect(&touched, 16)
+    });
     match ctrl.undo_last_visible_stroke() {
         Ok(UndoResult::Empty) => {
             println!("undo_result=empty");
@@ -2149,17 +2375,25 @@ fn undo_and_present(
             let remaining: Vec<Stroke> = ctrl.session.committed_strokes().to_vec();
             let chrome = chrome_for_page(manifest, ctrl.session.page_id())
                 .map_err(|e| format!("undo fatal=true label: {e}"))?;
-            match ctrl
-                .transport_mut()
-                .reconstruct_page(current_bg, &remaining, Some(chrome))
-            {
+            let presented = match region {
+                Some(r) => ctrl
+                    .transport_mut()
+                    .present_region(current_bg, &remaining, chrome, r),
+                None => ctrl
+                    .transport_mut()
+                    .reconstruct_page(current_bg, &remaining, Some(chrome)),
+            };
+            match presented {
                 Ok((reconstruct_us, gc16_us)) => {
-                    ctrl.clear_pending_clean();
+                    if region.is_none() {
+                        ctrl.clear_pending_clean();
+                    }
                     println!(
-                        "undo stroke_id={stroke_id} undo_durable=true \
+                        "undo stroke_id={stroke_id} undo_durable=true region={} \
                          persist_append_us={} persist_fsync_us={} \
                          persist_commit_us={} reconstruct_us={reconstruct_us} \
                          gc16_us={gc16_us}",
+                        region.is_some(),
                         timing.append_us,
                         timing.fsync_us,
                         timing.commit_us(),
@@ -2199,6 +2433,8 @@ struct UiExec<'a> {
     import_run: &'a mut Option<ImportRun>,
     /// Replica-local preferences.json (outside the library).
     prefs_path: &'a Path,
+    #[cfg(feature = "reader")]
+    reader: &'a mut ReaderRuntime,
     /// `--sync-dir` (Restore from Server replaces it with the library).
     sync_dir: Option<&'a Path>,
     lasso: &'a mut LassoState,
@@ -2502,12 +2738,14 @@ fn present_ui(
             refresh_folder_view(x.ui, x.folders, x.library);
             x.ui.settle_home(&cards);
             let open = x.ui.open_folder().map(|f| f.id.clone());
+            let covers = home_covers(x.library, x.ui, &cards, &x.geo);
             ctrl.transport_mut().render_home(
                 &cards,
                 &x.ui.folders,
                 open.as_deref(),
                 &x.ui.home,
                 x.ui.modal.as_ref(),
+                &covers,
             )
         }
         AppView::Sync => {
@@ -2532,6 +2770,32 @@ fn present_ui(
             fill_picker_thumbs(x.library, picker, &x.geo);
             ctrl.transport_mut()
                 .render_link_picker(picker, &cards, dialog.as_ref())
+        }
+        #[cfg(feature = "reader")]
+        AppView::Books => {
+            x.reader.prepare_library(&mut x.ui.reader, &x.geo);
+            ctrl.transport_mut()
+                .render_books(&x.ui.reader, x.ui.modal.as_ref())
+        }
+        #[cfg(feature = "reader")]
+        AppView::Reader => {
+            let Some(session) = x.reader.session.as_mut() else {
+                return Err("internal: Reader view without an open document".into());
+            };
+            match ctrl
+                .transport_mut()
+                .render_reader(session, x.ui.modal.as_ref())
+            {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    eprintln!("reader_render_failed detail={error}");
+                    x.reader.close();
+                    x.ui.enter_books();
+                    x.ui.show_error("This PDF page couldn't be rendered.");
+                    ctrl.transport_mut()
+                        .render_books(&x.ui.reader, x.ui.modal.as_ref())
+                }
+            }
         }
         AppView::Notebook => {
             let page_id = ctrl.session.page_id().to_string();
@@ -2746,6 +3010,37 @@ fn open_notebook_from_ui(
     );
     crate::launch_clock::mark("notebook_open_end");
     Ok(())
+}
+
+/// First-page covers for the notebooks on the visible Home page (derived cache only; a
+/// notebook whose manifest can't be read simply shows a blank cover).
+fn home_covers(
+    library: &LibraryRepository,
+    ui: &UiState,
+    cards: &[HomeCard],
+    geo: &FbGeometry,
+) -> HomeCovers {
+    let t0 = Instant::now();
+    let (w, h) = crate::library_ui::cover_size(geo);
+    let rows = ui.home_rows(cards);
+    let mut covers = HomeCovers::new();
+    for id in crate::home::visible_notebook_ids(&rows, cards, &ui.home) {
+        let dir = library.notebook_dir(&id);
+        let Ok(m) = crate::library::read_notebook_manifest_read_only(&dir) else {
+            continue;
+        };
+        let Some(first) = m.page_ids.first() else {
+            continue;
+        };
+        let pixels = crate::page_thumb::load_or_build_cover(&dir, first, geo.xres, geo.yres, w, h);
+        covers.insert(id, crate::library_ui::CoverImage { w, h, pixels });
+    }
+    println!(
+        "home_covers n={} ms={}",
+        covers.len(),
+        t0.elapsed().as_millis()
+    );
+    covers
 }
 
 fn fill_picker_thumbs(library: &LibraryRepository, picker: &mut LinkPickerState, geo: &FbGeometry) {
@@ -3099,6 +3394,65 @@ fn execute_ui_command(
         UiCommand::None => Ok(()),
         UiCommand::Redraw(Redraw::Full) => present_ui(x, ctrl, None),
         UiCommand::Redraw(Redraw::Region(r)) => present_ui(x, ctrl, Some(r)),
+        #[cfg(feature = "reader")]
+        UiCommand::OpenBooks => {
+            match crate::reader::scan_books() {
+                Ok(books) => {
+                    x.reader.close();
+                    x.ui.reader.set_books(books);
+                    x.ui.enter_books();
+                    println!("app_view=books books={}", x.ui.reader.books.len());
+                }
+                Err(e) => {
+                    eprintln!("reader_scan_failed detail={e}");
+                    x.ui.show_error("The books folder couldn't be read.");
+                }
+            }
+            present_ui(x, ctrl, None)
+        }
+        #[cfg(feature = "reader")]
+        UiCommand::OpenBook(index) => {
+            let Some(entry) = x.ui.reader.books.get(index).cloned() else {
+                x.ui.show_error("That book is no longer in the list.");
+                return present_ui(x, ctrl, None);
+            };
+            match x.reader.open(entry.clone()) {
+                Ok((page, pages)) => {
+                    x.ui.enter_reader(entry.title.clone(), page, pages);
+                    println!("reader_open file={:?} page={page}/{pages}", entry.path);
+                }
+                Err(e) => {
+                    eprintln!("reader_open_failed file={:?} detail={e}", entry.path);
+                    x.ui.show_error("The PDF couldn't be opened.");
+                }
+            }
+            present_ui(x, ctrl, None)
+        }
+        #[cfg(feature = "reader")]
+        UiCommand::GoBooks => {
+            x.reader.close();
+            match crate::reader::scan_books() {
+                Ok(books) => x.ui.reader.set_books(books),
+                Err(e) => eprintln!("reader_scan_failed detail={e}"),
+            }
+            x.ui.enter_books();
+            println!("app_view=books");
+            present_ui(x, ctrl, None)
+        }
+        #[cfg(feature = "reader")]
+        UiCommand::ReaderPreviousPage | UiCommand::ReaderNextPage => {
+            let next = cmd == UiCommand::ReaderNextPage;
+            if x.reader.turn(next)? {
+                let (page, pages) = x.reader.page_state().ok_or("reader lost its page state")?;
+                x.ui.reader.update_page(page, pages);
+                println!(
+                    "reader_page page={page}/{pages} direction={}",
+                    if next { "next" } else { "previous" }
+                );
+                present_ui(x, ctrl, None)?;
+            }
+            Ok(())
+        }
         UiCommand::OpenTools => {
             x.ui.enter_tools();
             println!("app_view=tools");
@@ -3226,6 +3580,9 @@ fn execute_ui_command(
             Ok(())
         }
         UiCommand::GoHome => {
+            crate::chrome::set_erase_mode(false);
+            #[cfg(feature = "reader")]
+            x.reader.close();
             if x.ui.view == AppView::Sync {
                 crate::server_link::with_global(|l| {
                     l.send(crate::server_link::LinkCmd::LeaveSyncScreen)
@@ -3465,6 +3822,14 @@ fn execute_ui_command(
                 }
             }
         }
+        UiCommand::ToggleEraser => {
+            let on = !crate::chrome::erase_mode();
+            crate::chrome::set_erase_mode(on);
+            println!("erase_mode on={on}");
+            let chrome = chrome_for_page(&*x.manifest, ctrl.session.page_id())?;
+            // Band-only repaint (no full-panel flash); chrome is visible whenever it was tapped.
+            ctrl.transport_mut().repair_chrome(chrome)
+        }
         UiCommand::Undo => {
             ctrl.totals.undo_gestures += 1;
             undo_and_present(
@@ -3483,7 +3848,9 @@ fn execute_ui_command(
             } else {
                 NavDownAction::NextOrCreate
             };
-            navigate(
+            let on_last = page_index(x.manifest, ctrl.session.page_id())
+                .is_some_and(|i| i + 1 == x.manifest.page_ids.len());
+            let moved = navigate(
                 x.notebook_dir,
                 x.manifest,
                 ctrl,
@@ -3491,8 +3858,15 @@ fn execute_ui_command(
                 x.current_bg,
                 action,
             )
-            .map(|_| ())
-            .map_err(|e| format!("error: page navigation: {e}"))
+            .map_err(|e| format!("error: page navigation: {e}"))?;
+            if !moved && cmd == UiCommand::NextPage && on_last && ctrl.is_idle() {
+                // "+ New page" on an untouched last page: say why nothing happened.
+                x.ui.show_error(
+                    "This page is still empty. Write on it first, then add a new page.",
+                );
+                present_ui(x, ctrl, None)?;
+            }
+            Ok(())
         }
         UiCommand::InsertPageAfter => {
             if !insert_page_after_current(
@@ -3874,6 +4248,8 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
     let mut ui = UiState::launch_home(active_notebook_index(&library), launch_cards.len());
     let prefs_path = prefs::preferences_path(cfg.sync_dir.as_deref(), cfg.device_dir.as_deref());
     ui.side_button = prefs::load_side_button(&prefs_path);
+    #[cfg(feature = "reader")]
+    let mut reader = ReaderRuntime::new(prefs_path.with_file_name(POSITIONS_FILE));
     if product_sync {
         ui.enable_sync();
     }
@@ -3884,7 +4260,16 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
     refresh_folder_view(&mut ui, &folders, &library);
     ui.settle_home(&launch_cards);
     crate::launch_clock::mark("home_paint_submit");
-    if let Err(e) = transport.render_home(&launch_cards, &ui.folders, None, &ui.home, None) {
+    let launch_geo = transport.geometry();
+    let launch_covers = home_covers(&library, &ui, &launch_cards, &launch_geo);
+    if let Err(e) = transport.render_home(
+        &launch_cards,
+        &ui.folders,
+        None,
+        &ui.home,
+        None,
+        &launch_covers,
+    ) {
         eprintln!("error: render Home at launch: {e}");
         drop(src);
         return abort_after_loading(e);
@@ -4056,6 +4441,8 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
                     stop: &stop,
                     import_run: &mut import_run,
                     prefs_path: &prefs_path,
+                    #[cfg(feature = "reader")]
+                    reader: &mut reader,
                     sync_dir: cfg.sync_dir.as_deref(),
                     lasso: &mut lasso,
                     overlay: &mut overlay,
@@ -4071,6 +4458,8 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
             } else {
                 "display_invalid"
             };
+            // After sleep/wake (screensaver) the panel shows something else: flash fully.
+            ctrl.transport_mut().forget_screen();
             match execute_ui_command(UiCommand::Redraw(Redraw::Full), &mut ui_exec!(), &mut ctrl) {
                 Ok(()) => {
                     router.display_presented();
@@ -4134,7 +4523,9 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
             && matches!(lasso, LassoState::Idle)
         {
             let now_ms = ms_since_start(Instant::now());
-            if ui.chrome.timeout_due(now_ms) {
+            // Erase mode keeps the bar up: its ERASE state stays visible and no hide/show
+            // refresh interrupts erasing.
+            if ui.chrome.timeout_due(now_ms) && !crate::chrome::erase_mode() {
                 ui.chrome.hide();
                 println!(
                     "chrome_auto_hide after_ms={}",
@@ -4144,9 +4535,14 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
             let want = ui.chrome_overlay_visible();
             if ctrl.transport().chrome_on_panel() != want {
                 ctrl.transport_mut().set_chrome_visible(want);
-                if let Err(e) =
-                    execute_ui_command(UiCommand::Redraw(Redraw::Full), &mut ui_exec!(), &mut ctrl)
-                {
+                // Notebook page, no modal: only the bands change, so only they are refreshed.
+                let strokes = ctrl.session.committed_strokes().to_vec();
+                let presented =
+                    chrome_for_page(&manifest, ctrl.session.page_id()).and_then(|chrome| {
+                        ctrl.transport_mut()
+                            .present_chrome_bands(&current_bg, &strokes, chrome)
+                    });
+                if let Err(e) = presented {
                     eprintln!("error: chrome present: {e}");
                     let (_c, safe, disarm_fail) = finish_shutdown(&mut ctrl, false);
                     shutdown_safe = safe;
@@ -4689,7 +5085,7 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
             break 1;
         }
 
-        let polled = src.poll_event();
+        let mut polled = src.poll_event();
         match &polled {
             Ok(SourcePoll::Event(ev)) => {
                 last_stylus_us = ctrl.transport().now_us();
@@ -4758,6 +5154,7 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
                 move_coalesce.moves_seen, move_coalesce.previews_rendered, move_coalesce.coalesced,
             );
         }
+        let mut remap_pen_to_eraser = false;
         if let Ok(SourcePoll::Event(ev)) = &polled {
             if ev.kind == StylusEventKind::Down {
                 // Pen remains drawing-only. It also supersedes an old move in the narrow undo
@@ -4799,7 +5196,28 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
                 }
             };
             if consumed {
+                if ev.kind == StylusEventKind::Down && ctrl.is_lingering() {
+                    if let Err(e) = ctrl.settle() {
+                        eprintln!("error: settle before ui tap: {e}");
+                        let (_c, safe, disarm_fail) = finish_shutdown(&mut ctrl, false);
+                        shutdown_safe = safe;
+                        stylus_mode_disarm_failed = disarm_fail;
+                        break 1;
+                    }
+                }
                 continue;
+            }
+            // On-screen Erase mode: the router left this Down to the page, so the pen tip erases.
+            remap_pen_to_eraser = crate::eraser::pen_down_acts_as_eraser(
+                crate::chrome::erase_mode(),
+                ev.kind,
+                ev.tool,
+            );
+        }
+        if remap_pen_to_eraser {
+            if let Ok(SourcePoll::Event(ev)) = polled.as_mut() {
+                ev.tool = StylusTool::Eraser;
+                println!("erase_mode pen_down_as_eraser=true");
             }
         }
         match polled {
@@ -4808,6 +5226,13 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
                 StylusEventKind::Down if ev.tool == StylusTool::Eraser => {
                     if nav.is_active() || eraser.is_active() {
                         continue;
+                    }
+                    if let Err(e) = ctrl.settle() {
+                        eprintln!("error: settle before erase: {e}");
+                        let (_c, safe, disarm_fail) = finish_shutdown(&mut ctrl, false);
+                        shutdown_safe = safe;
+                        stylus_mode_disarm_failed = disarm_fail;
+                        break 1;
                     }
                     if !ctrl.is_idle() || ctrl.is_armed() {
                         // Never interrupt an active pen stroke / armed wet path.
@@ -4835,16 +5260,27 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
                     // same contact* proceeds to ink. The page is reconstructed from durable
                     // state (GC16 FULL, waited) before the wet stroke arms, so the reconstruct
                     // can never erase the beginning of the stroke; queued Moves replay after.
+                    if ctrl.is_lingering() && ui.chrome_overlay_visible() {
+                        if let Err(e) = ctrl.settle() {
+                            eprintln!("error: settle before chrome dismiss: {e}");
+                            let (_c, safe, disarm_fail) = finish_shutdown(&mut ctrl, false);
+                            shutdown_safe = safe;
+                            stylus_mode_disarm_failed = disarm_fail;
+                            break 1;
+                        }
+                    }
                     if !ctrl.is_armed() && ui.chrome.pen_content_down() {
                         ctrl.transport_mut()
                             .set_chrome_visible(ui.chrome_overlay_visible());
                         let strokes = ctrl.session.committed_strokes().to_vec();
+                        // Only the bands change; refreshing them (waited) before the stroke arms
+                        // keeps the start of the stroke safe without a full-screen flash.
                         let presented = chrome_for_page(&manifest, ctrl.session.page_id())
                             .and_then(|chrome| {
-                                ctrl.transport_mut().reconstruct_page(
+                                ctrl.transport_mut().present_chrome_bands(
                                     &current_bg,
                                     &strokes,
-                                    Some(chrome),
+                                    chrome,
                                 )
                             });
                         if let Err(e) = presented {
@@ -4854,7 +5290,6 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
                             stylus_mode_disarm_failed = disarm_fail;
                             break 1;
                         }
-                        ctrl.clear_pending_clean();
                         println!("chrome_hidden reason=pen_content_down");
                     }
                     let page = device_to_page(&cal, ev.device.x, ev.device.y);
@@ -4901,6 +5336,14 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
                                     }
                                     NavDownAction::UndoLastStroke => {
                                         ctrl.totals.undo_gestures += 1;
+                                        if let Err(e) = ctrl.settle() {
+                                            eprintln!("error: settle before undo: {e}");
+                                            let (_c, safe, disarm_fail) =
+                                                finish_shutdown(&mut ctrl, false);
+                                            shutdown_safe = safe;
+                                            stylus_mode_disarm_failed = disarm_fail;
+                                            break 1;
+                                        }
                                         if !ctrl.is_idle() || ctrl.is_armed() {
                                             // Never interrupt wet stroke / armed stylus mode.
                                             continue;
@@ -5207,6 +5650,14 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
             Ok(SourcePoll::WouldBlock) => {
                 ctrl.totals.max_input_backlog =
                     ctrl.totals.max_input_backlog.max(src.backlog() as u64);
+                // End a linger once input is quiet (WAIT → disarm → durable append).
+                if let Err(e) = ctrl.maybe_settle(src.backlog() == 0) {
+                    eprintln!("error: settle: {e}");
+                    let (_c, safe, disarm_fail) = finish_shutdown(&mut ctrl, false);
+                    shutdown_safe = safe;
+                    stylus_mode_disarm_failed = disarm_fail;
+                    break 1;
+                }
                 // No partial refresh may land on a panel the screensaver owns.
                 let idle_clean = if router.display_valid() {
                     ctrl.maybe_idle_clean(src.backlog() == 0)
@@ -5303,6 +5754,10 @@ pub fn run_page_session(cfg: RuntimeConfig, stop: Arc<AtomicBool>) -> i32 {
             AppView::Tools => "tools",
             AppView::Preferences => "preferences",
             AppView::LinkTargetPicker => "link_picker",
+            #[cfg(feature = "reader")]
+            AppView::Books => "books",
+            #[cfg(feature = "reader")]
+            AppView::Reader => "reader",
         }
     );
     println!("notebook_pages={}", manifest.page_ids.len());

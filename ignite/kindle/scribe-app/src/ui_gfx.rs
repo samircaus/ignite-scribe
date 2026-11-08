@@ -228,6 +228,190 @@ impl<'a> Canvas<'a> {
     }
 }
 
+/// Proportional UI text and vector-ish shapes (rounded controls, icons) for the modern chrome.
+/// Antialiased by coverage: each pixel moves from its current gray toward `value`.
+impl Canvas<'_> {
+    fn blend(&mut self, x: i32, y: i32, value: u8, coverage: u8) {
+        if coverage == 0 || x < 0 || y < 0 || x as u32 >= self.geo.xres || y as u32 >= self.geo.yres
+        {
+            return;
+        }
+        let i = self.row_start(y as u32) + x as usize;
+        if let Some(d) = self.fb.get_mut(i) {
+            let (d0, v, c) = (*d as i32, value as i32, coverage as i32);
+            *d = (d0 + (v - d0) * c / 255) as u8;
+        }
+    }
+
+    /// Draw `text` in Source Sans at `px` pixels with its cap/ascender top at `top`. `bold`
+    /// thickens strokes by over-striking. Returns the advance width.
+    pub fn sans(&mut self, x: u32, top: u32, px: f32, text: &str, value: u8, bold: bool) -> u32 {
+        let font = crate::text_paint::ui_face();
+        let ascent = font
+            .horizontal_line_metrics(px)
+            .map(|m| m.ascent)
+            .unwrap_or(px * 0.8);
+        let baseline = top as f32 + ascent;
+        let mut pen = x as f32;
+        let passes: &[i32] = if bold { &[0, 1] } else { &[0] };
+        for ch in text.chars() {
+            let (m, bitmap) = font.rasterize(ch, px);
+            let gx = (pen + m.xmin as f32).round() as i32;
+            let gy = (baseline - m.height as f32 - m.ymin as f32).round() as i32;
+            for dx in passes {
+                for row in 0..m.height {
+                    for col in 0..m.width {
+                        let cov = bitmap[row * m.width + col];
+                        self.blend(gx + col as i32 + *dx, gy + row as i32, value, cov);
+                    }
+                }
+            }
+            pen += m.advance_width;
+        }
+        (pen - x as f32).ceil() as u32 + u32::from(bold)
+    }
+
+    /// Advance width of `text` at `px` (matches [`Self::sans`]).
+    pub fn sans_width(px: f32, text: &str, bold: bool) -> u32 {
+        let font = crate::text_paint::ui_face();
+        let w: f32 = text
+            .chars()
+            .map(|c| font.metrics(c, px).advance_width)
+            .sum();
+        w.ceil() as u32 + u32::from(bold)
+    }
+
+    /// `text` centred in `rect` (shrunk with an ellipsis when too wide).
+    pub fn sans_centered(&mut self, rect: Rect, px: f32, text: &str, value: u8, bold: bool) {
+        let mut shown = text.to_string();
+        while Self::sans_width(px, &shown, bold) > rect.w && shown.chars().count() > 1 {
+            let mut chars: Vec<char> = shown.trim_end_matches('…').chars().collect();
+            chars.pop();
+            shown = chars.into_iter().collect::<String>() + "…";
+        }
+        let w = Self::sans_width(px, &shown, bold);
+        let font = crate::text_paint::ui_face();
+        let cap = font.metrics('H', px).height as u32;
+        let ascent = font
+            .horizontal_line_metrics(px)
+            .map(|m| m.ascent)
+            .unwrap_or(px * 0.8) as u32;
+        // Centre the cap height, not the line box: labels look centred in their buttons.
+        let top =
+            (rect.y + rect.h.saturating_sub(cap) / 2).saturating_sub(ascent.saturating_sub(cap));
+        self.sans(
+            rect.x + rect.w.saturating_sub(w) / 2,
+            top,
+            px,
+            &shown,
+            value,
+            bold,
+        );
+    }
+
+    /// `text` shortened with an ellipsis to fit `max_w` at `px`.
+    pub fn sans_fit(px: f32, text: &str, max_w: u32, bold: bool) -> String {
+        if Self::sans_width(px, text, bold) <= max_w {
+            return text.to_string();
+        }
+        let mut chars: Vec<char> = text.chars().collect();
+        while !chars.is_empty() {
+            chars.pop();
+            let s: String = chars.iter().collect::<String>() + "…";
+            if Self::sans_width(px, &s, bold) <= max_w {
+                return s;
+            }
+        }
+        "…".into()
+    }
+
+    /// Left-aligned single line, vertically centred on the cap height in `rect`, ellipsized.
+    pub fn sans_left(&mut self, rect: Rect, px: f32, text: &str, value: u8, bold: bool) {
+        let shown = Self::sans_fit(px, text, rect.w, bold);
+        let font = crate::text_paint::ui_face();
+        let cap = font.metrics('H', px).height as u32;
+        let ascent = font
+            .horizontal_line_metrics(px)
+            .map(|m| m.ascent)
+            .unwrap_or(px * 0.8) as u32;
+        let top =
+            (rect.y + rect.h.saturating_sub(cap) / 2).saturating_sub(ascent.saturating_sub(cap));
+        self.sans(rect.x, top, px, &shown, value, bold);
+    }
+
+    /// Filled disc (antialiased edge).
+    pub fn disc(&mut self, cx: f32, cy: f32, r: f32, value: u8) {
+        let (x0, x1) = ((cx - r - 1.0).floor() as i32, (cx + r + 1.0).ceil() as i32);
+        let (y0, y1) = ((cy - r - 1.0).floor() as i32, (cy + r + 1.0).ceil() as i32);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+                let cov = (r + 0.5 - d).clamp(0.0, 1.0);
+                self.blend(x, y, value, (cov * 255.0) as u8);
+            }
+        }
+    }
+
+    /// Thick line with round caps (`width` in pixels, antialiased).
+    pub fn line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, value: u8) {
+        let r = width / 2.0;
+        let (minx, maxx) = ((x0.min(x1) - r - 1.0) as i32, (x0.max(x1) + r + 1.0) as i32);
+        let (miny, maxy) = ((y0.min(y1) - r - 1.0) as i32, (y0.max(y1) + r + 1.0) as i32);
+        let (dx, dy) = (x1 - x0, y1 - y0);
+        let len2 = (dx * dx + dy * dy).max(1e-6);
+        for y in miny..=maxy {
+            for x in minx..=maxx {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let t = (((px - x0) * dx + (py - y0) * dy) / len2).clamp(0.0, 1.0);
+                let d = ((px - x0 - t * dx).powi(2) + (py - y0 - t * dy).powi(2)).sqrt();
+                let cov = (r + 0.5 - d).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend(x, y, value, (cov * 255.0) as u8);
+                }
+            }
+        }
+    }
+
+    /// Polyline through `points` (thick, round joins).
+    pub fn polyline(&mut self, points: &[(f32, f32)], width: f32, value: u8) {
+        for w in points.windows(2) {
+            self.line(w[0].0, w[0].1, w[1].0, w[1].1, width, value);
+        }
+    }
+
+    fn round_rect_coverage(rect: Rect, radius: f32, px: f32, py: f32) -> f32 {
+        let (x0, y0) = (rect.x as f32, rect.y as f32);
+        let (x1, y1) = (rect.right() as f32, rect.bottom() as f32);
+        let r = radius.min((x1 - x0) / 2.0).min((y1 - y0) / 2.0);
+        let cx = px.clamp(x0 + r, x1 - r);
+        let cy = py.clamp(y0 + r, y1 - r);
+        let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+        if px < x0 || px > x1 || py < y0 || py > y1 {
+            return 0.0;
+        }
+        (r - d + 0.5).clamp(0.0, 1.0)
+    }
+
+    /// Filled rounded rectangle.
+    pub fn fill_round(&mut self, rect: Rect, radius: f32, value: u8) {
+        for y in rect.y..rect.bottom() {
+            for x in rect.x..rect.right() {
+                let cov = Self::round_rect_coverage(rect, radius, x as f32 + 0.5, y as f32 + 0.5);
+                self.blend(x as i32, y as i32, value, (cov * 255.0) as u8);
+            }
+        }
+    }
+
+    /// Rounded-rectangle outline `thickness` px wide, drawn inside `rect`; the inside is
+    /// filled with `inside`.
+    pub fn frame_round(&mut self, rect: Rect, radius: f32, thickness: u32, value: u8, inside: u8) {
+        self.fill_round(rect, radius, value);
+        let t = thickness.min(rect.w / 2).min(rect.h / 2);
+        let inner = Rect::new(rect.x + t, rect.y + t, rect.w - 2 * t, rect.h - 2 * t);
+        self.fill_round(inner, (radius - t as f32).max(0.0), inside);
+    }
+}
+
 pub fn glyph_advance(scale: u32) -> u32 {
     (GLYPH_W + 1).saturating_mul(scale.max(1))
 }
@@ -292,6 +476,53 @@ pub fn fit_text_tail(text: &str, scale: u32, width: u32) -> String {
     let mut out = String::from("...");
     out.extend(text.chars().skip(count - keep));
     out
+}
+
+/// Word wrap for the Source Sans UI face at `px`: greedy, overlong words hard-broken, at most
+/// `max_lines` lines with the last one ellipsized when text remains.
+pub fn sans_wrap(px: f32, text: &str, bold: bool, width: u32, max_lines: usize) -> Vec<String> {
+    let fits = |s: &str| Canvas::sans_width(px, s, bold) <= width;
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let candidate = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if fits(&candidate) {
+            current = candidate;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+        let mut rest = word.to_string();
+        while !fits(&rest) && rest.chars().count() > 1 {
+            let mut head = String::new();
+            for ch in rest.chars() {
+                head.push(ch);
+                if !fits(&head) {
+                    head.pop();
+                    break;
+                }
+            }
+            if head.is_empty() {
+                break;
+            }
+            rest = rest.chars().skip(head.chars().count()).collect();
+            lines.push(head);
+        }
+        current = rest;
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    if max_lines > 0 && lines.len() > max_lines {
+        let rest = lines.split_off(max_lines - 1).join(" ");
+        lines.push(Canvas::sans_fit(px, &(rest + "…"), width, bold));
+    }
+    lines
 }
 
 /// Greedy word wrap to `width`; overlong words are hard-broken. At most `max_lines` lines,

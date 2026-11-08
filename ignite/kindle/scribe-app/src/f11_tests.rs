@@ -18,7 +18,7 @@ mod tests {
     };
     use crate::home::{
         home_cards, render_home, viewport_page_count, AppView, HomeCard, HomeHit, HomeLayout,
-        HomeState, ROWS_PER_PAGE,
+        HomeState, ITEMS_PER_PAGE,
     };
     use crate::ink::InkRequest;
     use crate::keyboard::{
@@ -190,11 +190,11 @@ mod tests {
 
     #[test]
     fn home_launch_selects_active_notebook_without_mutating_library() {
-        let (root, mut lib) = library_with("launch", 8);
-        // Activate notebook-7 (index 6 → viewport page 1).
+        let (root, mut lib) = library_with("launch", 14);
+        // Activate notebook-13 (index 12 → viewport page 1).
         crate::library::switch_notebook_durable(
             &mut lib,
-            "notebook-7",
+            "notebook-13",
             &crate::library::SwitchNotebookHooks::default(),
         )
         .unwrap();
@@ -203,20 +203,20 @@ mod tests {
         let ui = UiState::launch_home(state.selected_index, lib.manifest().notebook_ids.len());
         assert_eq!(ui.view, AppView::Home);
         assert!(ui.modal.is_none());
-        assert_eq!(ui.home.selected_index, 6);
+        assert_eq!(ui.home.selected_index, 12);
         assert_eq!(ui.home.page, 1);
-        assert!(ui.home.visible_range(8).contains(&6));
+        assert!(ui.home.visible_range(14).contains(&12));
         assert!(!ui.allows_page_input());
 
         // Rendering Home and building cards is read-only.
         let g = panel_geo();
         let mut fb = vec![0u8; g.smem_len as usize];
         let c = home_cards(&lib);
-        assert_eq!(c.len(), 8);
+        assert_eq!(c.len(), 14);
         assert!(c.iter().all(|card| card.page_count == Some(1)));
         render_home(&mut fb, &g, &c, &ui.home).unwrap();
         assert_eq!(all_files(&root), before);
-        assert_eq!(lib.active_notebook_id(), "notebook-7");
+        assert_eq!(lib.active_notebook_id(), "notebook-13");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -252,15 +252,15 @@ mod tests {
     }
 
     #[test]
-    fn home_viewport_paging_for_1_6_7_20_notebooks() {
-        for (total, pages) in [(1usize, 1usize), (6, 1), (7, 2), (20, 4)] {
+    fn home_viewport_paging_for_1_12_13_40_notebooks() {
+        for (total, pages) in [(1usize, 1usize), (12, 1), (13, 2), (40, 4)] {
             assert_eq!(viewport_page_count(total), pages, "total={total}");
             let mut seen = Vec::new();
             let mut state = HomeState::selecting(0, total);
             loop {
                 let range = state.visible_range(total);
                 assert!(!range.is_empty(), "empty viewport page total={total}");
-                assert!(range.len() <= ROWS_PER_PAGE);
+                assert!(range.len() <= ITEMS_PER_PAGE);
                 seen.extend(range);
                 if !state.can_page_next(total) {
                     break;
@@ -310,15 +310,22 @@ mod tests {
     fn home_render_is_full_clear_and_shows_only_the_viewport_page() {
         let g = panel_geo();
         let mut fb = vec![0x55; g.smem_len as usize];
-        let state = HomeState::selecting(13, 20);
-        let summary = render_home(&mut fb, &g, &cards(20), &state).unwrap();
-        assert_eq!(summary.visible_entries, 6);
-        assert_eq!(summary.total_entries, 20);
+        let state = HomeState::selecting(30, 40);
+        let summary = render_home(&mut fb, &g, &cards(40), &state).unwrap();
+        assert_eq!(summary.visible_entries, 12);
+        assert_eq!(summary.total_entries, 40);
         assert_eq!(summary.viewport_page, 2);
         assert_eq!(summary.viewport_pages, 4);
+        // Full clear: the frame is identical whatever the previous frame was.
+        let mut other = vec![0xA7; g.smem_len as usize];
+        render_home(&mut other, &g, &cards(40), &state).unwrap();
         for y in 0..g.yres as usize {
             let row = &fb[y * 1872..y * 1872 + 1860];
-            assert!(!row.contains(&0x55), "stale pixel survived at row {y}");
+            assert_eq!(
+                row,
+                &other[y * 1872..y * 1872 + 1860],
+                "stale pixel survived at row {y}"
+            );
         }
     }
 
@@ -327,10 +334,10 @@ mod tests {
     #[test]
     fn home_hit_testing_new_cards_menus_and_pager() {
         let g = panel_geo();
-        let total = 14;
-        let state = HomeState::selecting(7, total); // page 1 → indices 6..12
+        let total = 26;
+        let state = HomeState::selecting(15, total); // page 1 → indices 12..24
         let layout = HomeLayout::new(&g, &state, total);
-        assert_eq!(layout.cards.len(), 6);
+        assert_eq!(layout.cards.len(), 12);
         assert_eq!(
             layout.hit(center(layout.new_button), &state, total),
             Some(HomeHit::New)
@@ -349,9 +356,9 @@ mod tests {
                 Some(HomeHit::CardMenu(*index))
             );
             // Large pen targets.
-            assert!(card.h >= 250 && menu.w >= 200);
+            assert!(card.h >= 250 && menu.w >= 120 && menu.h >= 120);
         }
-        assert_eq!(layout.cards[0].0, 6);
+        assert_eq!(layout.cards[0].0, 12);
         assert_eq!(
             layout.hit(center(layout.pager_previous), &state, total),
             Some(HomeHit::PagePrevious)
@@ -367,7 +374,7 @@ mod tests {
         let first = HomeState::selecting(0, total);
         let l0 = HomeLayout::new(&g, &first, total);
         assert_eq!(l0.hit(center(l0.pager_previous), &first, total), None);
-        let last = HomeState::selecting(13, total);
+        let last = HomeState::selecting(25, total);
         let l2 = HomeLayout::new(&g, &last, total);
         assert_eq!(l2.hit(center(l2.pager_next), &last, total), None);
         assert_eq!(l2.cards.len(), 2);
@@ -376,9 +383,9 @@ mod tests {
     #[test]
     fn home_taps_resolve_to_open_new_menu_and_paging_commands() {
         let g = panel_geo();
-        let c = cards(9);
-        let mut ui = home_ui(9, 0);
-        let layout = HomeLayout::new(&g, &ui.home, 9);
+        let c = cards(15);
+        let mut ui = home_ui(15, 0);
+        let layout = HomeLayout::new(&g, &ui.home, 15);
 
         let cmd = ui.on_tap(&g, center(layout.cards[2].1), &c, "Notebook 10", None);
         assert_eq!(cmd, UiCommand::OpenNotebook("notebook-3".into()));
@@ -391,7 +398,7 @@ mod tests {
         assert!(matches!(chooser, Modal::NewChooser { .. }), "{chooser:?}");
         let cmd = ui.on_tap(
             &g,
-            dialog_button(&g, &chooser, "NEW NOTEBOOK"),
+            dialog_button(&g, &chooser, "New notebook"),
             &c,
             "Notebook 10",
             None,
@@ -419,16 +426,16 @@ mod tests {
             })
         );
         let modal = ui.modal.clone().unwrap();
-        let cmd = ui.on_tap(&g, dialog_button(&g, &modal, "CANCEL"), &c, "x", None);
+        let cmd = ui.on_tap(&g, dialog_button(&g, &modal, "Cancel"), &c, "x", None);
         assert_eq!(cmd, UiCommand::Redraw(Redraw::Full));
         assert!(ui.modal.is_none());
 
         let cmd = ui.on_tap(&g, center(layout.pager_next), &c, "x", None);
         assert_eq!(cmd, UiCommand::Redraw(Redraw::Full));
         assert_eq!(ui.home.page, 1);
-        let l1 = HomeLayout::new(&g, &ui.home, 9);
+        let l1 = HomeLayout::new(&g, &ui.home, 15);
         let cmd = ui.on_tap(&g, center(l1.cards[0].1), &c, "x", None);
-        assert_eq!(cmd, UiCommand::OpenNotebook("notebook-7".into()));
+        assert_eq!(cmd, UiCommand::OpenNotebook("notebook-13".into()));
     }
 
     #[test]
@@ -606,7 +613,7 @@ mod tests {
             title: "Personal".into(),
         });
         let m = ui.modal.clone().unwrap();
-        ui.on_tap(&g, dialog_button(&g, &m, "RENAME"), &c, "x", None);
+        ui.on_tap(&g, dialog_button(&g, &m, "Rename"), &c, "x", None);
         assert_eq!(editor_of(&ui).text(), "Personal");
         // Save unchanged → no durable command.
         let cmd = tap_key(&mut ui, &g, EditorKey::Submit);
@@ -614,7 +621,7 @@ mod tests {
         assert!(ui.modal.is_none());
 
         ui.show_modal(m.clone());
-        ui.on_tap(&g, dialog_button(&g, &m, "RENAME"), &c, "x", None);
+        ui.on_tap(&g, dialog_button(&g, &m, "Rename"), &c, "x", None);
         for _ in 0..8 {
             tap_key(&mut ui, &g, EditorKey::Backspace);
         }
@@ -757,7 +764,7 @@ mod tests {
         // First Delete tap never deletes: it asks.
         let mut ui = home_ui(2, 0);
         ui.show_modal(menu.clone());
-        let cmd = ui.on_tap(&g, dialog_button(&g, &menu, "DELETE"), &cards(2), "x", None);
+        let cmd = ui.on_tap(&g, dialog_button(&g, &menu, "Delete"), &cards(2), "x", None);
         assert_eq!(cmd, UiCommand::Redraw(Redraw::Full));
         let confirm = ui.modal.clone().unwrap();
         let spec = dialog_spec(&confirm).unwrap();
@@ -765,7 +772,7 @@ mod tests {
         assert!(spec.body[0].contains("removed from the library"));
         let cmd = ui.on_tap(
             &g,
-            dialog_button(&g, &confirm, "CANCEL"),
+            dialog_button(&g, &confirm, "Cancel"),
             &cards(2),
             "x",
             None,
@@ -776,7 +783,7 @@ mod tests {
         ui.show_modal(confirm.clone());
         let cmd = ui.on_tap(
             &g,
-            dialog_button(&g, &confirm, "DELETE"),
+            dialog_button(&g, &confirm, "Delete"),
             &cards(2),
             "x",
             None,
@@ -786,7 +793,7 @@ mod tests {
         // Sole notebook: explanatory notice, no delete command.
         let mut ui = home_ui(1, 0);
         ui.show_modal(menu.clone());
-        let cmd = ui.on_tap(&g, dialog_button(&g, &menu, "DELETE"), &cards(1), "x", None);
+        let cmd = ui.on_tap(&g, dialog_button(&g, &menu, "Delete"), &cards(1), "x", None);
         assert_eq!(cmd, UiCommand::Redraw(Redraw::Full));
         let notice = ui.modal.clone().unwrap();
         let spec = dialog_spec(&notice).unwrap();
@@ -843,9 +850,13 @@ mod tests {
             None
         );
         assert_eq!(c.hit(UiPoint { x: 900, y: 1200 }), None);
-        for r in [c.home, c.undo, c.menu, c.previous, c.next] {
-            assert!(r.w >= 200 && r.h >= 80, "{r:?}");
+        // Touch targets: at least 100 × 80 panel px (~8.5 × 7 mm at 300 ppi); icon buttons
+        // since the 2026-11 redesign, wide pills for page navigation.
+        for r in [c.home, c.undo, c.menu, c.pen, c.erase, c.previous, c.next] {
+            assert!(r.w >= 100 && r.h >= 80, "{r:?}");
         }
+        assert_eq!(c.hit(center(c.pen)), Some(ChromeHit::Pen));
+        assert_eq!(c.hit(center(c.erase)), Some(ChromeHit::Erase));
     }
 
     #[test]
@@ -910,14 +921,14 @@ mod tests {
 
         ui.show_modal(menu(2, 3));
         assert_eq!(
-            tap(&mut ui, "INSERT PAGE AFTER"),
+            tap(&mut ui, "Insert page after"),
             UiCommand::InsertPageAfter
         );
         assert!(ui.modal.is_none());
         ui.show_modal(menu(2, 3));
-        assert_eq!(tap(&mut ui, "MOVE PAGE LEFT"), UiCommand::MovePageLeft);
+        assert_eq!(tap(&mut ui, "Move page left"), UiCommand::MovePageLeft);
         ui.show_modal(menu(2, 3));
-        assert_eq!(tap(&mut ui, "MOVE PAGE RIGHT"), UiCommand::MovePageRight);
+        assert_eq!(tap(&mut ui, "Move page right"), UiCommand::MovePageRight);
 
         // Boundaries: disabled buttons are visible but inert; the menu stays open.
         ui.show_modal(menu(1, 3));
@@ -926,35 +937,35 @@ mod tests {
             !spec
                 .buttons
                 .iter()
-                .find(|b| b.label == "MOVE PAGE LEFT")
+                .find(|b| b.label == "Move page left")
                 .unwrap()
                 .enabled
         );
-        assert_eq!(tap(&mut ui, "MOVE PAGE LEFT"), UiCommand::None);
+        assert_eq!(tap(&mut ui, "Move page left"), UiCommand::None);
         assert_eq!(ui.modal, Some(menu(1, 3)));
         ui.show_modal(menu(3, 3));
-        assert_eq!(tap(&mut ui, "MOVE PAGE RIGHT"), UiCommand::None);
+        assert_eq!(tap(&mut ui, "Move page right"), UiCommand::None);
         assert_eq!(ui.modal, Some(menu(3, 3)));
 
         // Delete asks first.
         ui.show_modal(menu(3, 3));
-        assert_eq!(tap(&mut ui, "DELETE PAGE"), UiCommand::Redraw(Redraw::Full));
+        assert_eq!(tap(&mut ui, "Delete page"), UiCommand::Redraw(Redraw::Full));
         assert_eq!(ui.modal, Some(Modal::ConfirmDeletePage { page_number: 3 }));
         assert_eq!(
             dialog_spec(ui.modal.as_ref().unwrap()).unwrap().heading,
             "Delete page 3?"
         );
-        assert_eq!(tap(&mut ui, "CANCEL"), UiCommand::Redraw(Redraw::Full));
+        assert_eq!(tap(&mut ui, "Cancel"), UiCommand::Redraw(Redraw::Full));
         assert!(ui.modal.is_none());
         ui.show_modal(Modal::ConfirmDeletePage { page_number: 3 });
-        assert_eq!(tap(&mut ui, "DELETE"), UiCommand::DeletePage);
+        assert_eq!(tap(&mut ui, "Delete"), UiCommand::DeletePage);
 
         // Sole page: refusal notice, no delete.
         ui.show_modal(menu(1, 1));
-        assert_eq!(tap(&mut ui, "DELETE PAGE"), UiCommand::Redraw(Redraw::Full));
+        assert_eq!(tap(&mut ui, "Delete page"), UiCommand::Redraw(Redraw::Full));
         assert_eq!(ui.modal, Some(Modal::sole_page_notice()));
         ui.show_modal(menu(2, 3));
-        assert_eq!(tap(&mut ui, "CANCEL"), UiCommand::Redraw(Redraw::Full));
+        assert_eq!(tap(&mut ui, "Cancel"), UiCommand::Redraw(Redraw::Full));
         assert!(ui.modal.is_none());
     }
 
@@ -1186,11 +1197,15 @@ mod tests {
         let mut fb = vec![0x44; g.smem_len as usize];
         let layout =
             render_notebook_chrome(&mut fb, &g, "Work", PageChrome { index: 3, count: 7 }).unwrap();
+        // The bands are opaque: whatever lay underneath, they come out identical.
+        let mut other = vec![0x45; g.smem_len as usize];
+        render_notebook_chrome(&mut other, &g, "Work", PageChrome { index: 3, count: 7 }).unwrap();
         for y in 0..g.yres {
             let row = &fb[(y * 1872) as usize..(y * 1872 + 1860) as usize];
             let in_band = layout.top_band.contains(0, y) || layout.bottom_band.contains(0, y);
             if in_band {
-                assert!(row.iter().all(|b| *b != 0x44), "band row {y} not painted");
+                let row2 = &other[(y * 1872) as usize..(y * 1872 + 1860) as usize];
+                assert_eq!(row, row2, "band row {y} not fully painted");
             } else {
                 assert!(row.iter().all(|b| *b == 0x44), "content row {y} touched");
             }
@@ -1212,15 +1227,15 @@ mod tests {
         // Outside the dialog halo, the underlying view is untouched.
         assert_eq!(fb[0], 0x44);
         assert_eq!(fb[(layout.frame.bottom() + 100) as usize * 1872 + 10], 0x44);
-        assert!(layout.frame.w >= 1500);
-        assert!(layout.buttons.iter().all(|(_, r)| r.h >= 150));
+        assert!(layout.frame.w >= 1100);
+        assert!(layout.buttons.iter().all(|(_, r)| r.h >= 130));
 
         // Title editor is full-screen: no remnant of the previous view.
         let mut fb = vec![0x44; g.smem_len as usize];
         render_title_editor(
             &mut fb,
             &g,
-            "NEW NOTEBOOK",
+            "New notebook",
             "CREATE",
             &TitleEditor::new("Work"),
         )
@@ -1243,7 +1258,7 @@ mod tests {
         assert_eq!(
             ui.on_tap(
                 &g,
-                dialog_button(&g, &chooser, "NEW NOTEBOOK"),
+                dialog_button(&g, &chooser, "New notebook"),
                 &cards(2),
                 "Notebook 3",
                 None

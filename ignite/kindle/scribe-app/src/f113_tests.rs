@@ -443,7 +443,7 @@ mod tests {
         let (_, cancel) = crate::modal::DialogLayout::new(&g, &spec)
             .buttons
             .into_iter()
-            .find(|(b, _)| b.label == "CANCEL")
+            .find(|(b, _)| b.label == "Cancel")
             .unwrap();
         assert_eq!(
             ui.on_ui_tap(&g, center(cancel), &cards(1), "x", ctx(), 11_000),
@@ -463,7 +463,7 @@ mod tests {
         let (_, ins) = crate::modal::DialogLayout::new(&g, &spec)
             .buttons
             .into_iter()
-            .find(|(b, _)| b.label == "INSERT PAGE AFTER")
+            .find(|(b, _)| b.label == "Insert page after")
             .unwrap();
         assert_eq!(
             ui.on_ui_tap(&g, center(ins), &cards(1), "x", ctx(), 500),

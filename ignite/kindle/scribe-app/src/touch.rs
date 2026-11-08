@@ -24,13 +24,16 @@ pub const TAP_MAX_TRAVEL_PX: u32 = 50;
 pub const LASSO_LONG_PRESS_MS: u64 = 450;
 /// Recorded taps lasted 12–140 ms.
 pub const TAP_MAX_MS: u64 = 700;
-/// Recorded deliberate swipes covered 520–900 px horizontally.
-pub const SWIPE_MIN_DX_PX: u32 = 350;
+/// Recorded deliberate swipes covered 520–900 px horizontally. Lowered from 350 px after a
+/// session (2026-11-05) where only 1 of several swipes registered; a short flick is still
+/// several times the 50 px tap tolerance.
+pub const SWIPE_MIN_DX_PX: u32 = 250;
 /// Recorded slow swipe: ~960 ms.
 pub const SWIPE_MAX_MS: u64 = 1200;
 /// Horizontal edge zones reserved for Kindle: contacts starting here never page-swipe.
-/// 8% (149 px): recorded natural right-to-left swipes started at x = 1547–1688.
-pub const EDGE_FRACTION_PERCENT: u32 = 8;
+/// 3% (55 px). Was 8% (149 px), which also swallowed natural left-to-right ("back") swipes,
+/// which start close to the left edge. Rejected swipes are logged (`finger_swipe_rejected`).
+pub const EDGE_FRACTION_PERCENT: u32 = 3;
 /// Touch stays suppressed this long after the last stylus event. The stylus parser reports
 /// proximity while the pen is in range (Hover) but emits no event when it leaves, so recent
 /// stylus activity is the proximity signal.
@@ -137,11 +140,27 @@ pub enum FingerOrigin {
     Ui,
     /// Notebook writing area: tap (no-op) or page swipe.
     Content,
+    /// Reader page: tap/swipe semantics, but never notebook lasso/selection.
+    #[cfg(feature = "reader")]
+    ReaderContent,
     /// Notebook left/right edge zone: reserved for Kindle; never a page swipe.
     Edge,
 }
 
 pub fn classify_origin(ui: &UiState, geo: &FbGeometry, p: UiPoint) -> FingerOrigin {
+    #[cfg(feature = "reader")]
+    if !ui.modal_open()
+        && ui.view == crate::home::AppView::Reader
+        && p.y >= crate::reader::SAFE_TOP
+        && p.y < crate::reader::SAFE_BOTTOM
+    {
+        let edge = geo.xres * EDGE_FRACTION_PERCENT / 100;
+        return if p.x < edge || p.x >= geo.xres.saturating_sub(edge) {
+            FingerOrigin::Edge
+        } else {
+            FingerOrigin::ReaderContent
+        };
+    }
     // Hidden chrome has no hit targets: its bands are page content (F11.3).
     // Every non-notebook view (Home, Sync, Tools) is UI: taps only, never page swipes.
     if ui.modal_open() || !ui.view.allows_page_input() || ui.chrome_hit(geo, p).is_some() {
@@ -518,7 +537,11 @@ fn classify(
     let horizontal = dx.unsigned_abs() >= u64::from(SWIPE_MIN_DX_PX)
         && dx.unsigned_abs() >= 2 * dy.unsigned_abs()
         && dur_ms <= SWIPE_MAX_MS;
-    if origin == FingerOrigin::Content && horizontal && ui.allows_page_input() {
+    let turns_pages = origin == FingerOrigin::Content && ui.allows_page_input();
+    #[cfg(feature = "reader")]
+    let turns_pages = turns_pages
+        || (origin == FingerOrigin::ReaderContent && ui.view == crate::home::AppView::Reader);
+    if horizontal && turns_pages {
         // Page pushed aside: swipe left → next, swipe right → previous.
         return (
             Some(if dx < 0 {
@@ -530,6 +553,23 @@ fn classify(
         );
     }
     // Drag from UI beyond tap tolerance, edge-origin, vertical/diagonal/short: no action.
+    if origin != FingerOrigin::Ui {
+        let reason = if origin == FingerOrigin::Edge {
+            "edge_origin"
+        } else if dx.unsigned_abs() < u64::from(SWIPE_MIN_DX_PX) {
+            "too_short"
+        } else if dx.unsigned_abs() < 2 * dy.unsigned_abs() {
+            "not_horizontal"
+        } else if dur_ms > SWIPE_MAX_MS {
+            "too_slow"
+        } else {
+            "not_page_input"
+        };
+        println!(
+            "finger_swipe_rejected reason={reason} start_x={} dx={dx} dy={dy} dur_ms={dur_ms}",
+            start.x
+        );
+    }
     (None, diag)
 }
 

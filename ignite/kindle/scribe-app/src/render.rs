@@ -41,10 +41,15 @@ pub fn style_for_stroke(stroke: &Stroke) -> Result<StrokeStyle, String> {
     }
 }
 
+/// Display-only extra radius (px) for all ink (pressure and legacy), so handwriting reads like the
+/// Kindle's own medium pen (normal pressure: radius 3, about 7 px). The sealed curve in every
+/// `page.meta` is unchanged: this affects only how this device paints, live and on redraw.
+pub const DISPLAY_WIDTH_BOOST: u32 = 1;
+
 /// Radius for a single sample under the pressure curve (used for single-point strokes
 /// and live-per-sample stamps). Missing/non-finite pressure → curve fallback radius.
 pub fn radius_for_pressure(curve: PressureCurveV1, pressure: Option<f32>) -> u32 {
-    curve.radius_for_pressure(pressure)
+    curve.radius_for_pressure(pressure) + DISPLAY_WIDTH_BOOST
 }
 
 fn merge(dirty: &mut Option<DirtyRegion>, d: Option<DirtyRegion>) {
@@ -58,12 +63,14 @@ fn merge(dirty: &mut Option<DirtyRegion>, d: Option<DirtyRegion>) {
 
 /// Conservative max square-brush radius this profile can paint (legacy or pressure).
 pub fn max_paint_radius(profile: &RenderProfile) -> u32 {
-    let mut r = profile.brush_radius;
+    let mut r = profile.brush_radius + DISPLAY_WIDTH_BOOST;
     if let Ok(c) = profile.pressure_curve() {
-        r = r
-            .max(c.max_radius)
-            .max(c.min_radius)
-            .max(c.missing_fallback_radius);
+        r = r.max(
+            c.max_radius
+                .max(c.min_radius)
+                .max(c.missing_fallback_radius)
+                + DISPLAY_WIDTH_BOOST,
+        );
     }
     r
 }
@@ -194,7 +201,7 @@ fn raster_stroke_into_at_shifted(
 
     match style {
         StrokeStyle::LegacyFixed => {
-            let radius = profile.brush_radius;
+            let radius = profile.brush_radius + DISPLAY_WIDTH_BOOST;
             let mut dirty: Option<DirtyRegion> = None;
             let mut last_px: Option<(i32, i32)> = None;
             for p in &stroke.points {
@@ -274,11 +281,11 @@ pub fn raster_pressure_segment_panel(
         let q0 = quantize_pressure(from_p.unwrap());
         let q1 = quantize_pressure(to_p.unwrap());
         raster_line_variable_radius(buf, geo, x0, y0, x1, y1, ink, |step, steps| {
-            curve.radius_for_q(interpolate_q(q0, q1, step, steps))
+            curve.radius_for_q(interpolate_q(q0, q1, step, steps)) + DISPLAY_WIDTH_BOOST
         })
         .map_err(|e| format!("{e:?}"))
     } else {
-        let r = curve.missing_fallback_radius;
+        let r = curve.missing_fallback_radius + DISPLAY_WIDTH_BOOST;
         raster_line(buf, geo, x0, y0, x1, y1, ink, r).map_err(|e| format!("{e:?}"))
     }
 }

@@ -215,7 +215,7 @@ mod tests {
             notebook_local: None,
             page_local: None,
         });
-        let remove = dialog_button(&g, ui.modal.as_ref().unwrap(), "REMOVE LINK");
+        let remove = dialog_button(&g, ui.modal.as_ref().unwrap(), "Remove link");
         assert_eq!(
             ui.on_tap(&g, remove, &[], "N", None),
             UiCommand::RemoveLink { link_id: lk(1) }

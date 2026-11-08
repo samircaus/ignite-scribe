@@ -48,6 +48,12 @@ fn face() -> &'static Font {
     primary_face()
 }
 
+/// The `default-sans-v1` face (Source Sans 3) for UI text (chrome, Home), shared with the
+/// text-object painter so both use one parsed font.
+pub(crate) fn ui_face() -> &'static Font {
+    primary_face()
+}
+
 fn is_variation_selector(ch: char) -> bool {
     matches!(ch as u32, 0xFE00..=0xFE0F | 0xE0100..=0xE01EF)
 }

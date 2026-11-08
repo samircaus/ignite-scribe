@@ -265,7 +265,8 @@ mod tests {
             finished: true,
         };
         let migrated = RenderProfile::sealed_v2_pressure(0x00).unwrap();
-        let radius = migrated.brush_radius;
+        // The live path (runtime) paints legacy ink with the same display boost.
+        let radius = migrated.brush_radius + crate::render::DISPLAY_WIDTH_BOOST;
 
         let mut live = vec![0xAAu8; g.smem_len as usize];
         render_live_fixed(&mut live, &g, radius, migrated.ink_byte, &legacy);

@@ -166,7 +166,7 @@ mod tests {
         let (_, r) = dl
             .buttons
             .iter()
-            .find(|(b, _)| b.label == "NEW NOTEBOOK")
+            .find(|(b, _)| b.label == "New notebook")
             .unwrap();
         let cmd = tap_resolve(&mut ui, center(*r), None);
         assert_eq!(cmd, UiCommand::Redraw(Redraw::Full));
@@ -209,7 +209,7 @@ mod tests {
         let (_, ins) = DialogLayout::new(&g, &spec)
             .buttons
             .into_iter()
-            .find(|(b, _)| b.label == "INSERT PAGE AFTER")
+            .find(|(b, _)| b.label == "Insert page after")
             .unwrap();
         assert_eq!(
             tap_resolve(&mut ui, center(ins), page),
@@ -236,7 +236,7 @@ mod tests {
         let card = center(HomeLayout::new(&g, &home.home, 9).cards[0].1);
         assert!(gesture(
             &home,
-            &line((card.x, card.y), (card.x - 400, card.y), 10),
+            &line((card.x, card.y), (card.x + 400, card.y), 10),
             250,
             false
         )
@@ -263,6 +263,12 @@ mod tests {
         // Many move events, one command.
         let long = gesture(&ui, &line((1600, 1300), (200, 1310), 400), 1100, false);
         assert_eq!(long, vec![FingerAction::NextPage]);
+
+        // A natural "back" swipe starts near the left edge; a short flick still counts.
+        let back_near_edge = gesture(&ui, &line((90, 1500), (700, 1480), 12), 250, false);
+        assert_eq!(back_near_edge, vec![FingerAction::PreviousPage]);
+        let flick = gesture(&ui, &line((1300, 1200), (1020, 1210), 8), 180, false);
+        assert_eq!(flick, vec![FingerAction::NextPage]);
 
         // Vertical, diagonal (recorded 1284,-1301), short, too slow: nothing.
         assert!(gesture(&ui, &line((900, 600), (910, 1800), 20), 300, false).is_empty());

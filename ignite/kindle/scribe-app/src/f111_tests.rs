@@ -121,7 +121,7 @@ mod tests {
         match down(&mut router, &ui, &g, card, StylusTool::Pen) {
             DownRoute::UiTap(p) => assert_eq!(
                 ui.on_tap(&g, p, &c, "x", None),
-                UiCommand::OpenNotebook("notebook-7".into())
+                UiCommand::OpenNotebook("notebook-1".into())
             ),
             other => panic!("{other:?}"),
         }

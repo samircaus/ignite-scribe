@@ -141,7 +141,10 @@ mod tests {
 
         let profile = RenderProfile::sealed_v2_pressure(0x00).unwrap();
         let curve = profile.pressure_curve().unwrap();
-        assert_eq!(radius_for_pressure(curve, None), LEGACY_FIXED_RADIUS);
+        assert_eq!(
+            radius_for_pressure(curve, None),
+            LEGACY_FIXED_RADIUS + crate::render::DISPLAY_WIDTH_BOOST
+        );
 
         let g = tiny_geo();
         let mut a = vec![0xAAu8; g.smem_len as usize];

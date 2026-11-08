@@ -20,6 +20,8 @@ use crate::keyboard::{EditorKey, EditorOutcome, KeyboardLayout, TitleEditor};
 use crate::link_picker::LinkPickerState;
 use crate::modal::{dialog_spec, ButtonId, DialogLayout, Modal, TitlePurpose, PICKER_PAGE};
 use crate::prefs::SideButtonAction;
+#[cfg(feature = "reader")]
+use crate::reader::{reader_hit, BooksHit, BooksLayout, ReaderHit, ReaderUiState};
 use crate::server_link::LinkView;
 use crate::settings_ui::{PreferencesHit, PreferencesLayout, SettingsChromeHit};
 use crate::sync_ui::{SyncHit, SyncLayout};
@@ -42,6 +44,16 @@ pub enum UiCommand {
     None,
     Redraw(Redraw),
     OpenNotebook(String),
+    #[cfg(feature = "reader")]
+    OpenBooks,
+    #[cfg(feature = "reader")]
+    OpenBook(usize),
+    #[cfg(feature = "reader")]
+    GoBooks,
+    #[cfg(feature = "reader")]
+    ReaderPreviousPage,
+    #[cfg(feature = "reader")]
+    ReaderNextPage,
     CreateNotebook(String),
     RenameNotebook {
         notebook_id: String,
@@ -52,6 +64,8 @@ pub enum UiCommand {
     /// Leave Scribe cleanly (Home exit icon).
     ExitApp,
     Undo,
+    /// Toggle the on-screen Erase mode (chrome button).
+    ToggleEraser,
     PreviousPage,
     NextPage,
     InsertPageAfter,
@@ -177,6 +191,8 @@ pub struct UiState {
     pub next_folder_title: String,
     /// Home shows this folder's notebooks (transient; never durable).
     pub home_folder: Option<String>,
+    #[cfg(feature = "reader")]
+    pub reader: ReaderUiState,
 }
 
 impl UiState {
@@ -195,6 +211,8 @@ impl UiState {
             folders: Vec::new(),
             next_folder_title: crate::folders::default_folder_title(1),
             home_folder: None,
+            #[cfg(feature = "reader")]
+            reader: ReaderUiState::default(),
         }
     }
 
@@ -291,6 +309,23 @@ impl UiState {
         self.link_picker = Some(picker);
     }
 
+    #[cfg(feature = "reader")]
+    pub fn enter_books(&mut self) {
+        self.view = AppView::Books;
+        self.modal = None;
+        self.chrome.hide();
+        self.link_picker = None;
+    }
+
+    #[cfg(feature = "reader")]
+    pub fn enter_reader(&mut self, title: String, page: usize, pages: usize) {
+        self.view = AppView::Reader;
+        self.modal = None;
+        self.chrome.hide();
+        self.link_picker = None;
+        self.reader.open(title, page, pages);
+    }
+
     pub fn modal_open(&self) -> bool {
         self.modal.is_some()
     }
@@ -384,6 +419,15 @@ impl UiState {
         notebook: Option<NotebookUiContext>,
         now_ms: u64,
     ) -> UiCommand {
+        #[cfg(feature = "reader")]
+        if self.view == AppView::Reader {
+            return match action {
+                FingerAction::NextPage => UiCommand::ReaderNextPage,
+                FingerAction::PreviousPage => UiCommand::ReaderPreviousPage,
+                FingerAction::Tap(p) => self.on_reader_tap(geo, p),
+                _ => UiCommand::None,
+            };
+        }
         let page_surface = self.allows_page_input();
         match action {
             FingerAction::NextPage | FingerAction::PreviousPage => {
@@ -448,6 +492,10 @@ impl UiState {
             AppView::Tools => self.on_tools_tap(geo, p),
             AppView::Preferences => self.on_preferences_tap(geo, p),
             AppView::LinkTargetPicker => self.on_link_picker_tap(geo, p, cards),
+            #[cfg(feature = "reader")]
+            AppView::Books => self.on_books_tap(geo, p),
+            #[cfg(feature = "reader")]
+            AppView::Reader => self.on_reader_tap(geo, p),
             AppView::Notebook => match notebook {
                 Some(ctx) => self.on_chrome_tap(geo, p, ctx),
                 None => UiCommand::None,
@@ -476,6 +524,8 @@ impl UiState {
             Some(HomeHit::Exit) => Some(UiCommand::ExitApp),
             Some(HomeHit::Sync) => Some(UiCommand::OpenSync),
             Some(HomeHit::Tools) => Some(UiCommand::OpenTools),
+            #[cfg(feature = "reader")]
+            Some(HomeHit::Books) => Some(UiCommand::OpenBooks),
             _ => None,
         };
         if let Some(cmd) = cmd {
@@ -488,6 +538,8 @@ impl UiState {
             | Some(HomeHit::Exit)
             | Some(HomeHit::Sync)
             | Some(HomeHit::Tools) => UiCommand::None,
+            #[cfg(feature = "reader")]
+            Some(HomeHit::Books) => UiCommand::None,
             Some(HomeHit::Back) => {
                 // Back to the main list, showing the folder just left.
                 self.home_folder = None;
@@ -496,11 +548,8 @@ impl UiState {
                     .as_deref()
                     .and_then(|id| self.folders.iter().position(|f| f.id == id))
                 {
-                    if let Some(row) = main
-                        .iter()
-                        .position(|r| matches!(r, HomeRow::Folders(v) if v.contains(&fi)))
-                    {
-                        self.home.page = row / crate::home::ROWS_PER_PAGE;
+                    if let Some(row) = main.iter().position(|r| *r == HomeRow::Folder(fi)) {
+                        self.home.page = row / crate::home::ITEMS_PER_PAGE;
                     }
                 }
                 UiCommand::Redraw(Redraw::Full)
@@ -557,6 +606,51 @@ impl UiState {
                 self.home.page += 1;
                 UiCommand::Redraw(Redraw::Full)
             }
+        }
+    }
+
+    #[cfg(feature = "reader")]
+    fn on_books_tap(&mut self, geo: &FbGeometry, point: UiPoint) -> UiCommand {
+        let layout = BooksLayout::new(geo, &self.reader);
+        match layout.hit(point, &self.reader) {
+            Some(BooksHit::Back) => UiCommand::GoHome,
+            Some(BooksHit::Exit) => UiCommand::ExitApp,
+            Some(BooksHit::OpenFolder(index)) => {
+                self.reader.open_folder(index);
+                UiCommand::Redraw(Redraw::Full)
+            }
+            Some(BooksHit::CloseFolder) => {
+                self.reader.close_folder();
+                UiCommand::Redraw(Redraw::Full)
+            }
+            Some(BooksHit::Open(index)) => {
+                self.reader.selected = index;
+                UiCommand::OpenBook(index)
+            }
+            Some(BooksHit::Previous) => {
+                self.reader.page = self.reader.page.saturating_sub(1);
+                UiCommand::Redraw(Redraw::Full)
+            }
+            Some(BooksHit::Next) => {
+                self.reader.page = (self.reader.page + 1).min(self.reader.page_count() - 1);
+                UiCommand::Redraw(Redraw::Full)
+            }
+            None => UiCommand::None,
+        }
+    }
+
+    #[cfg(feature = "reader")]
+    fn on_reader_tap(&mut self, geo: &FbGeometry, point: UiPoint) -> UiCommand {
+        match reader_hit(
+            geo,
+            point,
+            self.reader.current_page,
+            self.reader.current_pages,
+        ) {
+            Some(ReaderHit::Books) => UiCommand::GoBooks,
+            Some(ReaderHit::Previous) => UiCommand::ReaderPreviousPage,
+            Some(ReaderHit::Next) => UiCommand::ReaderNextPage,
+            None => UiCommand::None,
         }
     }
 
@@ -647,6 +741,10 @@ impl UiState {
             None | Some(ChromeHit::Inert) => UiCommand::None,
             Some(ChromeHit::Home) => UiCommand::GoHome,
             Some(ChromeHit::Undo) => UiCommand::Undo,
+            // Pen | Eraser switch: tapping the active half does nothing.
+            Some(ChromeHit::Erase) if !crate::chrome::erase_mode() => UiCommand::ToggleEraser,
+            Some(ChromeHit::Pen) if crate::chrome::erase_mode() => UiCommand::ToggleEraser,
+            Some(ChromeHit::Erase | ChromeHit::Pen) => UiCommand::None,
             Some(ChromeHit::PreviousPage) => {
                 if ctx.page.can_previous() {
                     UiCommand::PreviousPage

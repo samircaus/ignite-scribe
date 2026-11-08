@@ -6,8 +6,8 @@ mod tests {
     use crate::app_ui::{Redraw, UiCommand, UiState};
     use crate::folders::FolderInfo;
     use crate::home::{
-        home_rows, render_home_view, HomeCard, HomeHit, HomeLayout, HomeRow, HomeState,
-        FOLDERS_PER_ROW, ROWS_PER_PAGE,
+        home_rows, render_home_view, HomeCard, HomeCovers, HomeHit, HomeLayout, HomeRow, HomeState,
+        ITEMS_PER_PAGE,
     };
     use crate::modal::{dialog_spec, DialogLayout, Modal, TitlePurpose, PICKER_PAGE};
     use crate::ui_gfx::{panel_geo, Rect, UiPoint};
@@ -70,23 +70,16 @@ mod tests {
     }
 
     #[test]
-    fn folders_come_first_three_per_row_and_page_without_repeating() {
+    fn folders_come_first_and_page_without_repeating() {
         let c = cards(10);
-        // 7 folders → 3 folder rows; notebooks 1..3 are filed, 4..10 stay on the main list.
+        // 7 folders first; notebooks 1..3 are filed, 4..10 stay on the main grid.
         let mut folders: Vec<FolderInfo> = (1..=7).map(|n| folder(n, &[])).collect();
         folders[0] = folder(1, &[1, 2]);
         folders[6] = folder(7, &[3]);
         let rows = home_rows(&c, &folders, None);
+        assert_eq!(rows[..7], (0..7).map(HomeRow::Folder).collect::<Vec<_>>());
         assert_eq!(
-            rows[..3],
-            [
-                HomeRow::Folders(vec![0, 1, 2]),
-                HomeRow::Folders(vec![3, 4, 5]),
-                HomeRow::Folders(vec![6]),
-            ]
-        );
-        assert_eq!(
-            rows[3..],
+            rows[7..],
             (3..10).map(HomeRow::Notebook).collect::<Vec<_>>(),
             "filed notebooks leave the main list; the rest keep library order"
         );
@@ -101,15 +94,15 @@ mod tests {
         let many: Vec<FolderInfo> = (1..=20).map(|n| folder(n, &[])).collect();
         let g = panel_geo();
         let rows = home_rows(&c, &many, None);
-        assert_eq!(rows.len(), 20usize.div_ceil(FOLDERS_PER_ROW) + 10);
+        assert_eq!(rows.len(), 20 + 10);
         let mut seen = Vec::new();
         let mut state = HomeState::selecting(0, 10);
         state.settle(&rows, &c, &many);
-        assert_eq!(state.page, 1, "notebook 0 follows the 7 folder rows");
+        assert_eq!(state.page, 1, "notebook 0 follows the 20 folders");
         state.page = 0;
         loop {
             let l = HomeLayout::for_rows(&g, &state, &rows, false);
-            assert!(l.cards.len() + l.folders.len() / FOLDERS_PER_ROW <= ROWS_PER_PAGE + 1);
+            assert!(l.cards.len() + l.folders.len() <= ITEMS_PER_PAGE);
             seen.extend(l.folders.iter().map(|(f, _, _)| *f));
             // Tiles of one row share y and never overlap.
             for w in l.folders.windows(2) {
@@ -132,13 +125,13 @@ mod tests {
     #[test]
     fn launch_reveals_the_row_of_the_active_notebook_or_its_folder() {
         let c = cards(12);
-        let folders: Vec<FolderInfo> = (1..=18).map(|n| folder(n, &[])).collect();
-        // 6 folder rows fill page 0; notebook index 0 is on page 1.
+        let folders: Vec<FolderInfo> = (1..=ITEMS_PER_PAGE).map(|n| folder(n, &[])).collect();
+        // Folders fill page 0; notebook index 0 is on page 1.
         let mut ui = UiState::launch_home(0, 12);
         ui.folders = folders.clone();
         ui.settle_home(&c);
         assert_eq!(ui.home.page, 1);
-        // Filed in folder 1 → its tile row is on page 0.
+        // Filed in folder 1 → its tile is on page 0.
         let mut ui = UiState::launch_home(0, 12);
         ui.folders = folders;
         ui.folders[0] = folder(1, &[1]);
@@ -165,7 +158,16 @@ mod tests {
             vec![1, 2]
         );
         let mut fb = vec![0u8; g.smem_len as usize];
-        render_home_view(&mut fb, &g, &c, &ui.folders, Some("folder-1"), &ui.home).unwrap();
+        render_home_view(
+            &mut fb,
+            &g,
+            &c,
+            &ui.folders,
+            Some("folder-1"),
+            &ui.home,
+            &HomeCovers::new(),
+        )
+        .unwrap();
 
         // + NEW inside a folder: straight to the editor, filed in this folder.
         ui.on_tap(&g, center(l.new_button), &c, "Notebook 5", None);
@@ -202,8 +204,8 @@ mod tests {
         let l = layout(&g, &ui, &c);
         ui.on_tap(&g, center(l.new_button), &c, "Notebook 3", None);
         let chooser = ui.modal.clone().unwrap();
-        assert_eq!(labels(&chooser), ["NEW NOTEBOOK", "NEW FOLDER", "CANCEL"]);
-        ui.on_tap(&g, button(&g, &chooser, "NEW FOLDER"), &c, "x", None);
+        assert_eq!(labels(&chooser), ["New notebook", "New folder", "Cancel"]);
+        ui.on_tap(&g, button(&g, &chooser, "New folder"), &c, "x", None);
         match &ui.modal {
             Some(Modal::TitleEntry {
                 purpose: TitlePurpose::CreateFolder,
@@ -213,7 +215,7 @@ mod tests {
         }
         ui.modal = Some(chooser.clone());
         assert_eq!(
-            ui.on_tap(&g, button(&g, &chooser, "CANCEL"), &c, "x", None),
+            ui.on_tap(&g, button(&g, &chooser, "Cancel"), &c, "x", None),
             UiCommand::Redraw(Redraw::Full)
         );
         assert!(ui.modal.is_none());
@@ -231,11 +233,11 @@ mod tests {
         let menu = ui.modal.clone().unwrap();
         assert_eq!(
             labels(&menu),
-            ["RENAME", "ADD TO FOLDER", "DELETE", "CANCEL"]
+            ["Rename", "Add to folder", "Delete", "Cancel"]
         );
-        ui.on_tap(&g, button(&g, &menu, "ADD TO FOLDER"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Add to folder"), &c, "x", None);
         let picker = ui.modal.clone().unwrap();
-        assert_eq!(labels(&picker), ["Folder 1", "Folder 2", "CANCEL"]);
+        assert_eq!(labels(&picker), ["Folder 1", "Folder 2", "Cancel"]);
         assert_eq!(
             ui.on_tap(&g, button(&g, &picker, "Folder 2"), &c, "x", None),
             UiCommand::SetNotebookFolder {
@@ -252,18 +254,18 @@ mod tests {
         assert_eq!(
             labels(&menu),
             [
-                "RENAME",
-                "CHANGE FOLDER",
-                "REMOVE FROM FOLDER",
-                "DELETE",
-                "CANCEL"
+                "Rename",
+                "Change folder",
+                "Remove from folder",
+                "Delete",
+                "Cancel"
             ]
         );
-        ui.on_tap(&g, button(&g, &menu, "CHANGE FOLDER"), &c, "x", None);
-        assert_eq!(labels(ui.modal.as_ref().unwrap()), ["Folder 2", "CANCEL"]);
+        ui.on_tap(&g, button(&g, &menu, "Change folder"), &c, "x", None);
+        assert_eq!(labels(ui.modal.as_ref().unwrap()), ["Folder 2", "Cancel"]);
         ui.modal = Some(menu.clone());
         assert_eq!(
-            ui.on_tap(&g, button(&g, &menu, "REMOVE FROM FOLDER"), &c, "x", None),
+            ui.on_tap(&g, button(&g, &menu, "Remove from folder"), &c, "x", None),
             UiCommand::SetNotebookFolder {
                 notebook_id: "notebook-2".into(),
                 folder: None,
@@ -271,7 +273,7 @@ mod tests {
         );
         // RENAME and DELETE keep working from the in-folder menu.
         ui.modal = Some(menu.clone());
-        ui.on_tap(&g, button(&g, &menu, "RENAME"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Rename"), &c, "x", None);
         assert!(matches!(
             ui.modal,
             Some(Modal::TitleEntry {
@@ -280,7 +282,7 @@ mod tests {
             })
         ));
         ui.modal = Some(menu.clone());
-        ui.on_tap(&g, button(&g, &menu, "DELETE"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Delete"), &c, "x", None);
         assert!(matches!(
             ui.modal,
             Some(Modal::ConfirmDeleteNotebook { .. })
@@ -295,7 +297,7 @@ mod tests {
             folder_id: "folder-1".into(),
         });
         let menu = ui.modal.clone().unwrap();
-        ui.on_tap(&g, button(&g, &menu, "CHANGE FOLDER"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Change folder"), &c, "x", None);
         assert_eq!(ui.modal, Some(Modal::no_other_folder_notice()));
         let mut ui = ui_with(Vec::new(), 3);
         let menu = Modal::CardMenu {
@@ -303,7 +305,7 @@ mod tests {
             title: "Notebook 1".into(),
         };
         ui.modal = Some(menu.clone());
-        ui.on_tap(&g, button(&g, &menu, "ADD TO FOLDER"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Add to folder"), &c, "x", None);
         assert_eq!(ui.modal, Some(Modal::no_folders_notice()));
     }
 
@@ -318,7 +320,7 @@ mod tests {
             title: "Notebook 1".into(),
         };
         ui.modal = Some(menu.clone());
-        ui.on_tap(&g, button(&g, &menu, "ADD TO FOLDER"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Add to folder"), &c, "x", None);
         let p0 = ui.modal.clone().unwrap();
         let spec = dialog_spec(&p0).unwrap();
         assert_eq!(spec.buttons.len(), PICKER_PAGE + 3);
@@ -326,7 +328,7 @@ mod tests {
             !spec
                 .buttons
                 .iter()
-                .find(|b| b.label == "PREVIOUS")
+                .find(|b| b.label == "Previous")
                 .unwrap()
                 .enabled
         );
@@ -334,10 +336,10 @@ mod tests {
         let l = DialogLayout::new(&g, &spec);
         assert!(l.frame.bottom() <= g.yres);
 
-        ui.on_tap(&g, button(&g, &p0, "NEXT"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &p0, "Next"), &c, "x", None);
         ui.on_tap(
             &g,
-            button(&g, &ui.modal.clone().unwrap(), "NEXT"),
+            button(&g, &ui.modal.clone().unwrap(), "Next"),
             &c,
             "x",
             None,
@@ -349,7 +351,7 @@ mod tests {
                 .unwrap()
                 .buttons
                 .iter()
-                .find(|b| b.label == "NEXT")
+                .find(|b| b.label == "Next")
                 .unwrap()
                 .enabled
         );
@@ -370,18 +372,18 @@ mod tests {
         let l = layout(&g, &ui, &c);
         ui.on_tap(&g, center(l.folders[0].2), &c, "x", None);
         let menu = ui.modal.clone().unwrap();
-        assert_eq!(labels(&menu), ["RENAME", "DELETE", "CANCEL"]);
+        assert_eq!(labels(&menu), ["Rename", "Delete", "Cancel"]);
 
-        ui.on_tap(&g, button(&g, &menu, "DELETE"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Delete"), &c, "x", None);
         let confirm = ui.modal.clone().unwrap();
         assert!(matches!(confirm, Modal::ConfirmDeleteFolder { .. }));
         assert_eq!(
-            ui.on_tap(&g, button(&g, &confirm, "DELETE"), &c, "x", None),
+            ui.on_tap(&g, button(&g, &confirm, "Delete"), &c, "x", None),
             UiCommand::DeleteFolder("folder-1".into())
         );
 
         ui.modal = Some(menu.clone());
-        ui.on_tap(&g, button(&g, &menu, "RENAME"), &c, "x", None);
+        ui.on_tap(&g, button(&g, &menu, "Rename"), &c, "x", None);
         match &ui.modal {
             Some(Modal::TitleEntry {
                 purpose:

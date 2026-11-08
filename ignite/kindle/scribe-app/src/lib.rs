@@ -42,6 +42,7 @@ pub mod lasso;
 pub mod launch_clock;
 pub mod launch_diag;
 pub mod library;
+pub mod library_ui;
 pub mod link_paint;
 pub mod link_picker;
 mod link_tests;
@@ -59,6 +60,8 @@ pub mod prefs;
 pub mod pressure;
 pub mod pressure_curve;
 pub mod profile;
+#[cfg(feature = "reader")]
+pub mod reader;
 pub mod render;
 #[cfg(unix)]
 pub mod runtime;
