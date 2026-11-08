@@ -73,6 +73,37 @@ remains disabled in product code (`LIVE_NON_LOOPBACK_POST_ENABLED = false`).
 
 ---
 
+## MuPDF (optional `reader` feature of `scribe-app`; statically linked when enabled)
+
+The in-app reader (PDF, EPUB, CBZ) is built only with `--features scribe-app/reader`. It links
+MuPDF through the `mupdf` / `mupdf-sys` crates (0.8.0, which vendor MuPDF 1.27.2 and build it from
+source). Source is **not vendored** in this repository; Cargo fetches it from crates.io.
+
+| | |
+|---|---|
+| Components | MuPDF 1.27.2 (Artifex Software), `mupdf` and `mupdf-sys` Rust bindings |
+| License | MuPDF: AGPL-3.0-or-later (also offered commercially by Artifex); bindings: AGPL-3.0 |
+| Compatibility | Compatible with Ignite's AGPL-3.0-only; a binary built with `reader` is distributed under AGPL-3.0 as a whole |
+| Upstream | https://mupdf.com, https://github.com/messense/mupdf-rs |
+
+Features enabled: `epub`, `html`, `img`, `svg`, `cbz`, `base14-fonts` (no JavaScript, OCR,
+barcode, Brotli or DOCX output). With these, the build also compiles these libraries bundled in
+`mupdf-sys`, each under its own license (full texts in `mupdf-sys-0.8.0/mupdf/thirdparty/<name>/`):
+
+| Library | License |
+|---|---|
+| FreeType | FreeType License (FTL) or GPL-2.0, at the distributor's choice |
+| HarfBuzz | MIT ("Old MIT") |
+| jbig2dec | AGPL-3.0-or-later |
+| lcms2 (Artifex `lcms2mt` fork) | MIT |
+| libjpeg (IJG) | Independent JPEG Group License |
+| OpenJPEG | BSD-2-Clause |
+| zlib | zlib License |
+| gumbo-parser | Apache-2.0 |
+| URW base-14 fonts (`resources/fonts/urw`) | as distributed with MuPDF; see MuPDF's `COPYING` and `README` |
+
+---
+
 ## Rust / Cargo dependencies
 
 Workspace crates pull crates.io dependencies declared in `Cargo.toml` /

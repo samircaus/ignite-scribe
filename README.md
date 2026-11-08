@@ -1,5 +1,7 @@
 ![logo](github.jpg)
 
+> **This is a fork.** What it adds on top of upstream Ignite: [`FORK.md`](FORK.md).
+
 **Ignite** is an open-source **Kindle Scribe notebook replacement**: local
 handwriting, durable notebooks on-device, a one-file installer for prepared
 Kindles, and **optional** self-hosted sync.
