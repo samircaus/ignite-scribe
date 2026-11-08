@@ -1,0 +1,10 @@
+rust_toolchain=1.89.0
+zig_version=0.17.0
+cargo_zigbuild_version=0.24.0
+max_glibc=2.18
+linaro_archive=gcc-linaro-arm-linux-gnueabihf-4.8-2013.07-1_linux.tar.xz
+linaro_root=gcc-linaro-arm-linux-gnueabihf-4.8-2013.07-1_linux
+linaro_url=https://api.launchpad.net/1.0/linaro-toolchain-binaries/trunk/2013.07/+file/gcc-linaro-arm-linux-gnueabihf-4.8-2013.07-1_linux.tar.xz/file
+linaro_sha256=8c83e9f763bee6b9c7ce57899b5da2dc1c18034a76e49896d99c129d4ffc4e14
+builder_image=rust:1.89-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff
+builder_tag=ignite-glibc217-builder:rust1.89-v1

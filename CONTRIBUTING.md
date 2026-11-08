@@ -67,6 +67,22 @@ and size must match `tools/dropbear/PINNED.txt`. Public GitHub Releases are
 promoted from a hardware-tested CI run (exact bytes, no tag-push rebuild); see
 `docs/release-packaging.md`.
 
+### Fast macOS hardware-development build
+
+For iterative work against older hard-float Scribe firmware, macOS developers
+can build the large application and probe natively with static musl while a
+cached compatibility container builds only the LIPC lifecycle host against the
+pinned EGLIBC 2.17 sysroot:
+
+```bash
+bash tools/kindle_macos/build.sh
+```
+
+The script stages verified binaries under `target/kindle-macos/release/` and
+fails closed on architecture, hard-float ABI, linkage, interpreter, or glibc
+version drift. See `tools/kindle_macos/README.md`. This developer path does not
+replace the official release/provenance pipeline.
+
 ## Coding and testing expectations
 
 - Prefer small, reviewable changes with tests for behavioral fixes.

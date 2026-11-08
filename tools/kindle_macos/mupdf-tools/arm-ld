@@ -1,0 +1,3 @@
+#!/bin/sh
+# MuPDF embeds fonts with `ld -r -b binary`; target those objects at Kindle ARMv7.
+exec zig ld.lld -m armelf_linux_eabi "$@"
