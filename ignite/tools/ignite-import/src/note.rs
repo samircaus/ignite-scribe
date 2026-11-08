@@ -617,7 +617,10 @@ pub fn from_markdown(
     Ok((
         Spec {
             coords: Coords::Canonical,
-            notebook: NotebookIn { title },
+            notebook: NotebookIn {
+                title,
+                folder: None,
+            },
             pages: p.pages,
         },
         warnings,

@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use ignite_import::build::{build, default_render, Ctx, Plan};
 use ignite_import::client::{discover_library, fetch_target, submit, Http, ReplicaFile, Transport};
+use ignite_import::folder::{self, Target as FolderTarget};
+use ignite_import::manage::Ids;
 use ignite_import::note::{from_markdown, NoteOptions};
 use ignite_import::preview::page_svg;
 use ignite_import::spec::{Paper, Spec};
@@ -15,12 +17,14 @@ use sync_protocol::{
 use uuid::Uuid;
 
 const USAGE: &str = "\
-ignite-import <spec.json> [options]
-ignite-import note <note.md> [--title T] [--paper blank|lined|dot|grid] [--extra-pages N] [options]
+ignite-import <spec.json> [--folder NAME] [options]
+ignite-import note <note.md> [--title T] [--paper blank|lined|dot|grid] [--extra-pages N]
+              [--folder NAME] [options]
 
   Validates a page spec (or lays out a Markdown note with the Kindle's own text metrics) and,
   with --confirm-write, creates it as a NEW notebook on an Ignite sync server. Existing
-  notebooks are never modified.
+  notebooks are never modified. --folder (or the spec's notebook.folder) files the new notebook
+  in that folder; a folder that does not exist yet is created (the report says so).
 
 ignite-import list --server URL --token-file FILE
 ignite-import delete-notebook <index|id> --server URL --token-file FILE --state-dir DIR [--confirm-write]
@@ -31,7 +35,13 @@ ignite-import copy-pages <index|id> --pages 1-4 --into <index|id> [--before N] -
   copy-pages copies pages verbatim (every stroke point and pressure, typed text) into another
   notebook, before its page N (default: at the end). The source notebook is not changed.
 
-  list shows notebooks with their indexes. The delete commands only describe what they would
+ignite-import move-notebook <index|id>... (--folder NAME | --top-level) --server URL
+              --token-file FILE --state-dir DIR [--confirm-write]
+
+  move-notebook files existing notebooks in a folder (by title, case-insensitive, or id;
+  created when missing) or moves them back to the top level. Only folder membership changes.
+
+  list shows notebooks with their indexes and folders. The delete commands only describe what they would
   delete unless --confirm-write is given. Deleted items stay quarantined on the Kindle.
 
 Options:
@@ -74,7 +84,7 @@ struct Out {
 fn manage_cmd(args: &[String]) -> Result<Out, String> {
     use ignite_import::client::fetch_snapshot;
     use ignite_import::manage::{
-        format_rows, plan_copy_pages, plan_delete_notebook, plan_delete_page, rows, Ids,
+        format_rows, plan_copy_pages, plan_delete_notebook, plan_delete_page, rows,
     };
 
     let cmd = args[0].as_str();
@@ -89,8 +99,10 @@ fn manage_cmd(args: &[String]) -> Result<Out, String> {
                 "ok": true, "command": "list", "library": library.to_string(),
                 "notebooks": r.iter().map(|r| json!({
                     "index": r.index, "id": r.id.to_string(), "title": r.title,
-                    "pages": r.pages, "strokes": r.strokes
-                })).collect::<Vec<_>>()
+                    "pages": r.pages, "strokes": r.strokes,
+                    "folder": snap.notebooks[r.index].folder_id.and_then(|f| snap.folders.iter().find(|x| x.folder_id == f)).map(|f| f.title.clone())
+                })).collect::<Vec<_>>(),
+                "folders": snap.folders.iter().map(|f| json!({"id": f.folder_id.to_string(), "title": f.title})).collect::<Vec<_>>()
             }),
             text: format_rows(&r),
         });
@@ -177,6 +189,69 @@ fn manage_cmd(args: &[String]) -> Result<Out, String> {
         } else {
             format!("deleted {what}\nThe Kindle applies the deletion on its next sync pull; deleted items are quarantined on the device, not erased.\n")
         },
+    })
+}
+
+/// `move-notebook <index|id>... (--folder NAME | --top-level)`.
+fn move_cmd(args: &[String]) -> Result<Out, String> {
+    use ignite_import::client::fetch_snapshot;
+
+    let url = opt(args, "--server").ok_or("--server is required")?;
+    let http = Http::new(&url, token(args)?)?;
+    let library = discover_library(&http, opt(args, "--library").as_deref())?;
+    let snap = fetch_snapshot(&http, library)?;
+    let sels: Vec<String> = args[1..]
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .cloned()
+        .collect();
+    let mut mint = || Uuid::now_v7();
+    let target = match (opt(args, "--folder"), flag(args, "--top-level")) {
+        (Some(name), false) => folder::resolve(&snap.folders, &name, &mut mint)?,
+        (None, true) => FolderTarget::TopLevel,
+        _ => return Err("move-notebook needs exactly one of --folder NAME or --top-level".into()),
+    };
+    let write = flag(args, "--confirm-write");
+    let dir = opt(args, "--state-dir").map(PathBuf::from);
+    let mut replica = match (&dir, write) {
+        (Some(d), _) => ReplicaFile::load_or_create(d, library, &mut mint)?,
+        (None, true) => return Err("--confirm-write needs --state-dir".into()),
+        (None, false) => ReplicaFile::load_or_create(
+            &std::env::temp_dir().join("ignite-import-preview"),
+            library,
+            &mut mint,
+        )?,
+    };
+    let ids = Ids {
+        library_id: library,
+        replica_id: replica.replica_id,
+        first_client_seq: replica.next_client_seq,
+    };
+    let (plan, moved, unchanged, what) = folder::plan_move(&snap, &sels, &target, &ids, &mut mint)?;
+    let list = |v: &[folder::Moved]| {
+        v.iter()
+            .map(|m| json!({"id": m.id.to_string(), "title": m.title, "from": m.from}))
+            .collect::<Vec<_>>()
+    };
+    let mut report = json!({
+        "ok": true, "command": "move-notebook", "library": library.to_string(),
+        "notebook": { "id": plan.notebook_id.to_string() },
+        "folder": target.report(),
+        "notebooks": list(&moved), "unchanged": list(&unchanged),
+        "description": what, "envelopes": plan.envelopes.len(), "written": false
+    });
+    if !write {
+        return Ok(Out {
+            report,
+            text: format!("would {what}\n{} operations; nothing was sent (pass --confirm-write and --state-dir to write)\n", plan.envelopes.len()),
+        });
+    }
+    let res = submit(&http, &plan, &mut replica, &mut |_| {})?;
+    report["written"] = json!(true);
+    report["headServerSeq"] = json!(res.head_server_seq);
+    Ok(Out {
+        report,
+        text: format!("done: {what}\nThe Kindle applies it on its next sync pull.\n"),
     })
 }
 
@@ -281,7 +356,7 @@ fn create_cmd(
     }
 
     // Library facts: from the server when given (read-only), else a fixed offline stand-in.
-    let (library, render, after, notes) = match &http {
+    let (library, render, after, notes, folders) = match &http {
         Some(h) => {
             let lib = discover_library(h, opt(args, "--library").as_deref())?;
             let t = fetch_target(h, lib)?;
@@ -304,6 +379,7 @@ fn create_cmd(
                 t.render.unwrap_or_else(default_render),
                 t.after_notebook_id,
                 note,
+                t.folders,
             )
         }
         None => (
@@ -312,7 +388,25 @@ fn create_cmd(
             None,
             "offline dry run (no server): placeholder library, sealed default render profile"
                 .into(),
+            Vec::new(),
         ),
+    };
+    let folder = match spec.notebook.folder.as_deref() {
+        None => None,
+        Some(name) => {
+            let t = folder::resolve(&folders, name, &mut mint)?;
+            if http.is_none() {
+                warnings.push(format!(
+                    "offline: folder {:?} was not checked against the library",
+                    name.trim()
+                ));
+            } else if let FolderTarget::New { title, .. } = &t {
+                warnings.push(format!(
+                    "folder {title:?} does not exist yet; this write creates it"
+                ));
+            }
+            Some(t)
+        }
     };
     text.push_str(&format!("{notes}\n"));
 
@@ -334,7 +428,15 @@ fn create_cmd(
         render,
         after_notebook_id: after,
     };
-    let plan = build(&spec, &ctx, &mut mint)?;
+    let mut plan = build(&spec, &ctx, &mut mint)?;
+    if let Some(t) = &folder {
+        let ids = Ids {
+            library_id: library,
+            replica_id,
+            first_client_seq: first_seq,
+        };
+        folder::file_new_notebook(&mut plan, t, &ids, &mut mint)?;
+    }
     let blob_bytes: usize = plan.blobs.iter().map(|b| b.bytes.len()).sum();
     text.push_str(&format!(
         "plan: notebook {:?} with {} pages, {} strokes, {} text objects, {} envelopes, {} background blob(s) ({} MB)\n",
@@ -346,6 +448,9 @@ fn create_cmd(
         plan.blobs.len(),
         blob_bytes / 1_000_000
     ));
+    if let Some(t) = &folder {
+        text.push_str(&format!("filed in {}\n", t.describe()));
+    }
     for w in &warnings {
         text.push_str(&format!("warning: {w}\n"));
     }
@@ -353,6 +458,7 @@ fn create_cmd(
         "ok": true, "command": command, "written": false,
         "library": if http.is_some() { json!(library.to_string()) } else { Value::Null },
         "notebook": { "title": spec.notebook.title },
+        "folder": folder.as_ref().map(FolderTarget::report).unwrap_or(Value::Null),
         "pages": plan.pages.len(), "strokes": plan.stroke_count(), "texts": plan.text_count(),
         "envelopes": plan.envelopes.len(), "blobs": plan.blobs.len(), "blobBytes": blob_bytes,
         "warnings": warnings
@@ -420,7 +526,7 @@ fn note_cmd(args: &[String]) -> Result<Out, String> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Note".into());
-    let (spec, warnings) = from_markdown(
+    let (mut spec, warnings) = from_markdown(
         &md,
         &fallback,
         &NoteOptions {
@@ -429,6 +535,7 @@ fn note_cmd(args: &[String]) -> Result<Out, String> {
             extra_pages,
         },
     )?;
+    spec.notebook.folder = opt(args, "--folder");
     if let Some(f) = opt(args, "--spec-out") {
         std::fs::write(&f, spec_json(&spec)).map_err(|e| format!("{f}: {e}"))?;
     }
@@ -456,7 +563,7 @@ fn spec_json(spec: &Spec) -> String {
         })
         .collect();
     serde_json::to_string_pretty(
-        &json!({"coords": "canonical", "notebook": {"title": spec.notebook.title}, "pages": pages}),
+        &json!({"coords": "canonical", "notebook": {"title": spec.notebook.title, "folder": spec.notebook.folder}, "pages": pages}),
     )
     .unwrap()
 }
@@ -465,13 +572,18 @@ fn run(args: &[String]) -> Result<Out, String> {
     match args.first().map(String::as_str) {
         Some("list" | "delete-notebook" | "delete-page" | "copy-pages") => return manage_cmd(args),
         Some("note") => return note_cmd(args),
+        Some("move-notebook") => return move_cmd(args),
         _ => {}
     }
     let spec_path = args
         .first()
         .filter(|a| !a.starts_with("--"))
         .ok_or_else(|| USAGE.to_string())?;
-    let spec = Spec::parse(&std::fs::read(spec_path).map_err(|e| format!("{spec_path}: {e}"))?)?;
+    let mut spec =
+        Spec::parse(&std::fs::read(spec_path).map_err(|e| format!("{spec_path}: {e}"))?)?;
+    if let Some(f) = opt(args, "--folder") {
+        spec.notebook.folder = Some(f);
+    }
     create_cmd(args, spec, Vec::new(), "create")
 }
 

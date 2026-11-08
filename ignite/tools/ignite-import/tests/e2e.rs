@@ -335,3 +335,135 @@ fn copy_pages_inserts_verbatim_copies_before_a_page_and_leaves_the_source_alone(
     }
     assert_eq!(after.notebooks[1], source, "source notebook untouched");
 }
+
+#[test]
+fn folders_file_new_notebooks_and_move_existing_ones_without_touching_content() {
+    use ignite_import::client::fetch_snapshot;
+    use ignite_import::folder::{file_new_notebook, plan_move, resolve, Target};
+    use ignite_import::manage::Ids;
+
+    let dir = tmp("srv-folder");
+    let server =
+        ServerHandle::start("127.0.0.1:0".parse().unwrap(), Store::open(&dir).unwrap()).unwrap();
+    let http = Http::new(&server.base_url(), None).unwrap();
+    http.request(
+        "POST",
+        "/v1/libraries",
+        &genesis().to_canonical_bytes().unwrap(),
+    )
+    .unwrap();
+    let lib = library();
+    let state = tmp("state-folder");
+    let mut mint = || Uuid::now_v7();
+    let mut replica = ReplicaFile::load_or_create(&state, lib, &mut mint).unwrap();
+    let ids = |r: &ReplicaFile| Ids {
+        library_id: lib,
+        replica_id: r.replica_id,
+        first_client_seq: r.next_client_seq,
+    };
+
+    // 1. A new notebook filed in a folder that does not exist yet: the folder is created.
+    let mut spec = Spec::parse(SPEC.as_bytes()).unwrap();
+    spec.notebook.folder = Some("Review".into());
+    let target = fetch_target(&http, lib).unwrap();
+    assert!(target.folders.is_empty());
+    let folder = resolve(&target.folders, "Review", &mut mint).unwrap();
+    assert!(matches!(folder, Target::New { .. }));
+    let ctx = Ctx {
+        library_id: lib,
+        replica_id: replica.replica_id,
+        first_client_seq: replica.next_client_seq,
+        render: target.render.unwrap(),
+        after_notebook_id: target.after_notebook_id,
+    };
+    let mut plan = build(&spec, &ctx, &mut mint).unwrap();
+    let content = plan.envelopes.len();
+    file_new_notebook(&mut plan, &folder, &ids(&replica), &mut mint).unwrap();
+    assert_eq!(
+        plan.envelopes.len(),
+        content + 2,
+        "CreateFolder + SetNotebookFolder"
+    );
+    submit(&http, &plan, &mut replica, &mut |_| {}).unwrap();
+    let snap = fetch_snapshot(&http, lib).unwrap();
+    assert_eq!(snap.folders.len(), 1);
+    assert_eq!(snap.folders[0].title, "Review");
+    let review = snap.folders[0].folder_id;
+    assert_eq!(snap.notebooks[1].folder_id, Some(review));
+    assert_eq!(snap.notebooks[0], genesis().notebooks[0]);
+
+    // 2. A second notebook into the same folder, named in another case: no second folder.
+    let folder = resolve(&snap.folders, "review", &mut mint).unwrap();
+    assert_eq!(
+        folder,
+        Target::Existing {
+            id: review,
+            title: "Review".into()
+        }
+    );
+    let target = fetch_target(&http, lib).unwrap();
+    let ctx = Ctx {
+        library_id: lib,
+        replica_id: replica.replica_id,
+        first_client_seq: replica.next_client_seq,
+        render: target.render.unwrap(),
+        after_notebook_id: target.after_notebook_id,
+    };
+    let mut plan = build(&spec, &ctx, &mut mint).unwrap();
+    file_new_notebook(&mut plan, &folder, &ids(&replica), &mut mint).unwrap();
+    submit(&http, &plan, &mut replica, &mut |_| {}).unwrap();
+    let snap = fetch_snapshot(&http, lib).unwrap();
+    assert_eq!(snap.folders.len(), 1);
+    assert_eq!(snap.notebooks[2].folder_id, Some(review));
+
+    // 3. Move the existing top-level notebook (and one already there) into a new folder
+    //    "Yearly"; then one back to the top level. Content never changes.
+    let before = snap.clone();
+    let yearly = resolve(&snap.folders, "Yearly", &mut mint).unwrap();
+    let sels = vec!["0".to_string(), snap.notebooks[1].notebook_id.to_string()];
+    let (p, moved, unchanged, desc) =
+        plan_move(&snap, &sels, &yearly, &ids(&replica), &mut mint).unwrap();
+    assert_eq!(moved.len(), 2);
+    assert!(unchanged.is_empty());
+    assert_eq!(moved[1].from.as_deref(), Some("Review"));
+    assert!(desc.contains("new folder \"Yearly\""), "{desc}");
+    submit(&http, &p, &mut replica, &mut |_| {}).unwrap();
+    let snap = fetch_snapshot(&http, lib).unwrap();
+    assert_eq!(
+        snap.folders
+            .iter()
+            .map(|f| f.title.as_str())
+            .collect::<Vec<_>>(),
+        ["Review", "Yearly"]
+    );
+    let yearly_id = snap.folders[1].folder_id;
+    assert_eq!(snap.notebooks[0].folder_id, Some(yearly_id));
+    assert_eq!(snap.notebooks[1].folder_id, Some(yearly_id));
+    assert_eq!(snap.notebooks[2].folder_id, Some(review));
+    for (a, b) in snap.notebooks.iter().zip(&before.notebooks) {
+        assert_eq!(
+            (&a.notebook_id, &a.title, &a.pages),
+            (&b.notebook_id, &b.title, &b.pages)
+        );
+    }
+
+    // Moving only notebooks already in the folder is refused as a no-op.
+    let yearly = resolve(&snap.folders, "YEARLY", &mut mint).unwrap();
+    assert!(plan_move(&snap, &["0".into()], &yearly, &ids(&replica), &mut mint).is_err());
+
+    let (p, _, _, desc) = plan_move(
+        &snap,
+        &["0".into()],
+        &Target::TopLevel,
+        &ids(&replica),
+        &mut mint,
+    )
+    .unwrap();
+    assert!(
+        desc.contains("from folder \"Yearly\"") && desc.ends_with("into the top level"),
+        "{desc}"
+    );
+    submit(&http, &p, &mut replica, &mut |_| {}).unwrap();
+    let snap = fetch_snapshot(&http, lib).unwrap();
+    assert_eq!(snap.notebooks[0], genesis().notebooks[0]);
+}

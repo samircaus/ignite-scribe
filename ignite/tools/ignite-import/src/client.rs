@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use sync_protocol::{LibraryId, NotebookId, RenderProfileRef, ReplicaId, SyncSnapshotV1};
+use sync_protocol::{
+    LibraryId, NotebookId, RenderProfileRef, ReplicaId, SnapshotFolder, SyncSnapshotV1,
+};
 use uuid::Uuid;
 
 use crate::build::Plan;
@@ -106,6 +108,8 @@ pub struct Target {
     /// The last notebook, so the new one is placed at the end.
     pub after_notebook_id: Option<NotebookId>,
     pub notebook_count: usize,
+    /// Live folders, for filing the new notebook.
+    pub folders: Vec<SnapshotFolder>,
 }
 
 pub fn discover_library(t: &dyn Transport, explicit: Option<&str>) -> Result<LibraryId, String> {
@@ -152,6 +156,7 @@ pub fn fetch_target(t: &dyn Transport, library: LibraryId) -> Result<Target, Str
         render,
         after_notebook_id: snap.notebooks.last().map(|n| n.notebook_id),
         notebook_count: snap.notebooks.len(),
+        folders: snap.folders.clone(),
     })
 }
 

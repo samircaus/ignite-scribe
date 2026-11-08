@@ -75,7 +75,7 @@ pub struct Ids {
     pub first_client_seq: u64,
 }
 
-fn envelope(
+pub fn envelope(
     ids: &Ids,
     seq: u64,
     mint: &mut dyn FnMut() -> Uuid,

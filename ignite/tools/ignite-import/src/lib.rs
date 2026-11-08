@@ -10,10 +10,13 @@
 //!
 //! Module map: [`spec`] (input format), [`font`] (built-in single-line stroke font), [`paper`]
 //! (gray8 page backgrounds), [`build`] (spec → envelopes), [`client`] (HTTP + replica state),
-//! [`preview`] (SVG preview, no device or server needed).
+//! [`preview`] (SVG preview, no device or server needed), [`folder`] (filing notebooks in
+//! folders: `CreateFolder` + `SetNotebookFolder`, the only operations that touch an existing
+//! notebook besides the explicit delete/copy commands in [`manage`]).
 
 pub mod build;
 pub mod client;
+pub mod folder;
 pub mod font;
 pub mod layout;
 pub mod manage;

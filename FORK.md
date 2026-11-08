@@ -28,8 +28,8 @@ firmware.
 
 - **`ignite-import`** (`ignite/tools/ignite-import/`): create notebooks from a JSON page spec, send a
   Markdown note as pages laid out with the Kindle's own text metrics (tasks become ink
-  checkboxes), list and delete notebooks or pages, copy pages between notebooks, and dry-run
-  previews. It talks to `scribe-sync-server` like any other sync replica.
+  checkboxes), list and delete notebooks or pages, copy pages between notebooks, file notebooks in folders
+  and move them between folders, and dry-run previews. It talks to `scribe-sync-server` like any other sync replica.
 - **Fast macOS build** (`tools/kindle_macos/build.sh`) for older hard-float firmware, with ELF checks.
 - **Wi-Fi deploy** (`tools/kindle_macos/deploy.sh`): backs up the Kindle's state, installs over
   key-only SSH reachable from one Mac, keeps the previous binary. Setup in

@@ -3,8 +3,9 @@
 Create Ignite notebooks from a small JSON "page spec" (written by hand, a script or an AI
 assistant). The tool is another sync **replica**: it posts ordinary, validated operations
 (`CreateNotebook`, `CreatePage`, `AddStroke`, `AddText`) to a `scribe-sync-server`, and the Kindle
-pulls the notebook through its normal inbound sync. An import only ever **adds** a new notebook; the
-separate `delete-*` and `copy-pages` commands below change nothing without `--confirm-write`.
+pulls the notebook through its normal inbound sync. It only ever **adds** a new notebook; existing
+notebooks are never modified or deleted, except by the explicit `delete-*`, `copy-pages` and
+`move-notebook` commands below.
 
 ## What you get on the Kindle
 
@@ -23,6 +24,9 @@ See `examples/poc.json` and the module docs in `src/spec.rs`. Coordinates defaul
 **page-width units** (`x` 0..1, `y` 0..1.333) so circles stay circles; use
 `"coords": "canonical"` for raw 15624 × 20832 units. Points outside the page are rejected, never
 clamped.
+
+`notebook.folder` (optional, or `--folder NAME` on the command line, which wins) files the new
+notebook in an Ignite notebook folder; see [Folders](#folders).
 
 ## Usage
 
@@ -50,7 +54,7 @@ cargo run -p ignite-import -- spec.json --server http://192.168.1.20:8787 \
 ## Markdown notes
 
 ```bash
-ignite-import note "My Note.md" [--title T] [--paper lined] [--extra-pages 2] [--spec-out spec.json] ...
+ignite-import note "My Note.md" [--title T] [--paper lined] [--extra-pages 2] [--folder Weekly] [--spec-out spec.json] ...
 ```
 
 Lays an Obsidian-flavoured note out as pages with the Kindle's own text metrics
@@ -61,7 +65,9 @@ checkboxes you can tick with the pen. Images/embeds become placeholders. Up to 8
 ## Machine-readable use
 
 `--json` prints one JSON object (`ok`, `written`, counts, `warnings`, `error`; after a write also
-`notebook.id`, `headServerSeq` and `strokeIds` of the ink the importer drew). `--preview-dir` also
+`notebook.id`, `headServerSeq` and `strokeIds` of the ink the importer drew). With a folder, the
+report has `folder: {id, title, created}` (`created: true` = this write creates the folder);
+without one, `folder: null`. `--preview-dir` also
 writes `preview.json` (snapshot-shaped pages) plus `paper-<sha>.gray8`, so a caller can render the
 plan exactly like a synced page, for example to show a dry run before an assistant or script
 writes to the library.
@@ -92,6 +98,36 @@ before page `--before` of `<dst>` (omit it to append). Strokes and typed text ar
 (same points, pressure and pen style) under fresh ids, so the source is untouched; to *move*
 pages, follow with `delete-notebook` or `delete-page` on the source. Rehearse against a scratch
 copy of the server's data dir first (`sqlite3 .backup` of the ledger plus `blobs/`).
+
+## Folders
+
+```bash
+ignite-import spec.json --folder Weekly ...                          # file a new notebook in a folder
+ignite-import note "Plan.md" --folder Review ...
+ignite-import move-notebook <index|id>... --folder Review --server URL --token-file F                       # dry run
+ignite-import move-notebook <index|id>... --folder Review --server URL --token-file F --state-dir D --confirm-write
+ignite-import move-notebook <index|id>... --top-level ...            # back out of any folder
+```
+
+These use the operations the Kindle's own folder UI emits: `CreateFolder` and
+`SetNotebookFolder`. Only folder membership changes; pages, ink and notebook order do not.
+
+- A folder is named by its **title, matched case-insensitively** after trimming, or by its full
+  folder id. Two folders with the same title make the name ambiguous: give the id.
+- **A folder that does not exist yet is created** (appended after the existing folders, like
+  "New folder" on the Kindle). The JSON report says `"created": true` and the text output says
+  `new folder "…" (created by this write)`, so a caller can show it before writing. Offline dry
+  runs cannot check, and warn instead.
+- For a new notebook the folder operations come after all its content, so an interrupted write
+  leaves a complete notebook at the top level, never a partial one in the folder.
+- `move-notebook` takes several notebooks at once. Ones already in the target folder are listed
+  under `unchanged` and skipped; if that is all of them, the command refuses (nothing to do). Its
+  report lists each moved notebook with `from` (its folder before, `null` = top level).
+- `list` shows each notebook's `folder` and the library's `folders`.
+
+Rehearsed 2026-11-08 against a scratch copy of the live ledger: moving five notebooks into two new
+folders, sending a note into an existing folder named in another case, and moving notebooks back to
+the top level changed only folder membership.
 
 ## Safe area (chrome bands)
 

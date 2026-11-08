@@ -7,7 +7,7 @@
 //! page units instead.
 //!
 //! ```json
-//! { "notebook": { "title": "PoC" },
+//! { "notebook": { "title": "PoC", "folder": "Weekly" },
 //!   "pages": [ { "paper": "lined",
 //!     "labels": [ { "text": "HELLO", "x": 0.08, "y": 0.10, "size": 0.04 } ],
 //!     "shapes": [ { "kind": "rect", "x": 0.1, "y": 0.3, "w": 0.3, "h": 0.15 },
@@ -40,6 +40,10 @@ pub struct Spec {
 #[serde(deny_unknown_fields)]
 pub struct NotebookIn {
     pub title: String,
+    /// Folder to file the new notebook in, by title (case-insensitive) or id. A folder that
+    /// does not exist yet is created. Absent = top level.
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 /// Paper background. `blank` needs no blob; the others upload one shared 4.6 MB gray8 blob.
