@@ -41,6 +41,16 @@ firmware.
 - `docs/fork-audit.md`: how the sync protocol, ledger and page model work, and what outside tools
   can safely write.
 
+## Not affiliated with Amazon
+
+Kindle and Kindle Scribe are trademarks of Amazon.com, Inc. or its affiliates. This project is not
+affiliated with, endorsed by or supported by Amazon or by the upstream Ignite project. It runs only
+on Kindles that are already jailbroken, it does not jailbreak devices, and it opens only DRM-free
+files; it does not and will not remove DRM from Kindle books.
+
+Modifying a Kindle's software can void its warranty and may conflict with Amazon's terms of use.
+You do this at your own risk.
+
 ## Safety
 
 The sync server is plain HTTP with one shared bearer token: use it on a trusted home LAN only.
