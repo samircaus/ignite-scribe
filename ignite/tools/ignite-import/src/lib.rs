@@ -14,13 +14,16 @@
 //! folders: `CreateFolder` + `SetNotebookFolder`, the only operations that touch an existing
 //! notebook besides the explicit delete/copy commands in [`manage`]).
 
+pub mod annotate;
 pub mod build;
 pub mod client;
 pub mod folder;
 pub mod font;
+pub mod hand;
 pub mod layout;
 pub mod manage;
 pub mod note;
 pub mod paper;
 pub mod preview;
 pub mod spec;
+pub mod svg;
