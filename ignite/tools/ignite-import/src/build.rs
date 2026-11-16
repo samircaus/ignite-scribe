@@ -46,6 +46,8 @@ pub struct Plan {
     /// Distinct backgrounds to upload before the envelopes (deduplicated by SHA-256).
     pub blobs: Vec<Blob>,
     pub pages: Vec<PagePreview>,
+    /// Non-fatal notes (e.g. SVG elements that were not drawn).
+    pub warnings: Vec<String>,
 }
 
 impl Plan {
@@ -123,6 +125,26 @@ fn band_error(what: &str, y: f32, unit: f32) -> String {
     )
 }
 
+/// Pressure that lands in each pen width's band of the sealed pressure curve (radius 1: q up
+/// to 820 of 4095, radius 3: 2867–3685). Normal ink keeps the fixed style.
+fn pen_stroke(pen: crate::spec::Pen, poly: Vec<(f32, f32)>) -> (Style, Vec<Vec<f32>>) {
+    use crate::spec::Pen;
+    let p = match pen {
+        Pen::Normal => {
+            return (
+                Style::Fixed,
+                poly.into_iter().map(|(x, y)| vec![x, y]).collect(),
+            )
+        }
+        Pen::Thin => 0.1,
+        Pen::Bold => 0.8,
+    };
+    (
+        Style::Pressure,
+        poly.into_iter().map(|(x, y)| vec![x, y, p]).collect(),
+    )
+}
+
 /// `page_width`: the page width expressed in the spec's units (sizes the arrow head).
 fn shape_polylines(shape: &Shape, page_width: f32) -> Vec<Vec<(f32, f32)>> {
     match *shape {
@@ -167,6 +189,7 @@ pub fn build(spec: &Spec, ctx: &Ctx, mint: &mut dyn FnMut() -> Uuid) -> Result<P
     let mut blobs: Vec<Blob> = Vec::new();
     let mut seen_blobs = HashSet::new();
     let mut previews = Vec::new();
+    let mut warnings = Vec::new();
 
     let mut emit = |op: SyncOperationV1, mint: &mut dyn FnMut() -> Uuid| -> Result<(), String> {
         let env = SyncEnvelopeV1 {
@@ -247,6 +270,35 @@ pub fn build(spec: &Spec, ctx: &Ctx, mint: &mut dyn FnMut() -> Uuid) -> Result<P
                     Style::Fixed,
                     poly.into_iter().map(|(x, y)| vec![x, y]).collect(),
                 ));
+            }
+        }
+
+        for (wi, w) in page.writing.iter().enumerate() {
+            let size = w
+                .size
+                .unwrap_or(crate::spec::WRITING_SIZE * CANONICAL_PAGE_WIDTH / sc.unit);
+            let lines = crate::hand::layout(&w.text, w.x, w.y, size, w.width)
+                .map_err(|e| here(&format!("writing {}: {e}", wi + 1)))?;
+            for poly in lines {
+                polys.push(pen_stroke(w.pen, poly));
+            }
+        }
+        for (di, d) in page.drawings.iter().enumerate() {
+            if !(d.width.is_finite() && d.width > 0.) || d.height.is_some_and(|h| !(h > 0.)) {
+                return Err(here(&format!(
+                    "drawing {}: width/height must be positive",
+                    di + 1
+                )));
+            }
+            let parsed =
+                crate::svg::parse(&d.svg).map_err(|e| here(&format!("drawing {}: {e}", di + 1)))?;
+            for w in &parsed.warnings {
+                warnings.push(here(&format!("drawing {}: {w}", di + 1)));
+            }
+            let placed = crate::svg::place(&parsed, d.x, d.y, d.width, d.height);
+            for (poly, is_text) in placed.into_iter().zip(parsed.text.iter()) {
+                let pen = if *is_text { d.text_pen } else { d.pen };
+                polys.push(pen_stroke(pen, poly));
             }
         }
 
@@ -360,12 +412,42 @@ pub fn build(spec: &Spec, ctx: &Ctx, mint: &mut dyn FnMut() -> Uuid) -> Result<P
         envelopes,
         blobs,
         pages: previews,
+        warnings,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writing_and_labels_default_to_the_thin_pen_at_the_chosen_size() {
+        use crate::spec::{DrawingIn, Pen, WritingIn};
+        let w: WritingIn = serde_json::from_str(r#"{"text":"hi","x":0.1,"y":0.2}"#).unwrap();
+        assert_eq!((w.size, w.pen), (None, Pen::Thin));
+        let d: DrawingIn =
+            serde_json::from_str(r#"{"svg":"<svg/>","x":0,"y":0,"width":0.5}"#).unwrap();
+        assert_eq!((d.pen, d.text_pen), (Pen::Normal, Pen::Thin));
+    }
+
+    #[test]
+    fn pen_widths_land_in_the_right_pressure_bands() {
+        use crate::spec::Pen;
+        let curve = default_render().pressure.unwrap();
+        let q = |pen| {
+            let (style, pts) = pen_stroke(pen, vec![(0., 0.), (1., 1.)]);
+            (style, pts[0].get(2).map(|p| (p * 4095.).round() as u16))
+        };
+        assert_eq!(q(Pen::Normal), (Style::Fixed, None));
+        let (s, Some(thin)) = q(Pen::Thin) else {
+            panic!()
+        };
+        assert!(s == Style::Pressure && thin <= curve.q_r1_max);
+        let (_, Some(bold)) = q(Pen::Bold) else {
+            panic!()
+        };
+        assert!(bold > curve.q_r2_max && bold <= curve.q_r3_max);
+    }
     use crate::spec::Spec;
     use sync_protocol::PressureCurveRef;
 

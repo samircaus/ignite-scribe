@@ -240,6 +240,7 @@ pub fn plan_move(
         envelopes,
         blobs: Vec::new(),
         pages: Vec::new(),
+        warnings: Vec::new(),
     };
     Ok((plan, moved, unchanged, desc))
 }

@@ -4,19 +4,39 @@ Create Ignite notebooks from a small JSON "page spec" (written by hand, a script
 assistant). The tool is another sync **replica**: it posts ordinary, validated operations
 (`CreateNotebook`, `CreatePage`, `AddStroke`, `AddText`) to a `scribe-sync-server`, and the Kindle
 pulls the notebook through its normal inbound sync. It only ever **adds** a new notebook; existing
-notebooks are never modified or deleted, except by the explicit `delete-*`, `copy-pages` and
-`move-notebook` commands below.
+notebooks are never modified or deleted, except by the explicit `delete-*`, `copy-pages`,
+`move-notebook`, `annotate` and `delete-ink` commands below.
 
 ## What you get on the Kindle
 
 | Spec element | Becomes | On the Kindle |
 |---|---|---|
 | `shapes`, `strokes`, `labels` | native ink strokes | erasable, lasso-movable, undoable |
+| `writing` | native ink strokes (handwriting font, wrapped) | erasable, lasso-movable, undoable |
+| `drawings` (SVG) | native ink strokes (outlines) | erasable, lasso-movable, undoable |
 | `paper` (`lined`/`dot`/`grid`) | page background blob | static (not selectable) |
 | `texts` | text object | shown, **not editable on the Kindle** (editable in ignite-web) |
 
 `labels` are drawn with a built-in single-line stroke font (A–Z, 0–9, `.,-:!?'/()+`), so headings
 behave like handwriting. Anything the font lacks is an error, not silently dropped.
+
+`writing` uses a second, original single-line **handwriting** font (`src/hand.rs`) with
+lowercase, digits, common punctuation, `→ ← • ° € %`, German umlauts and `ß`; curly quotes and
+dashes are mapped to plain ones. `{ "text", "x", "y", "size"?, "width"?, "pen"? }`: `size` is
+the capital height (default 0.017 page widths, about 2.7 mm), `width` wraps words, `\n` starts a
+new line. `"pen": "thin" | "normal" | "bold"` picks the line width (Kindle pen radius 1, 2 or 3;
+default thin). The defaults were picked on the Kindle from a ladder of sizes; use `normal` for
+headings.
+
+`drawings` take a small SVG subset (`src/svg.rs`): `path` (all commands, arcs included), `line`,
+`polyline`, `polygon`, `rect`, `circle`, `ellipse`, nested `g` with `transform`, and the root
+`viewBox`. `{ "svg", "x", "y", "width", "height"? }` scales the drawing into that box keeping its
+aspect ratio. Everything is drawn as an outline. `<text>` (with `<tspan>`s) is written in the
+handwriting font: `x`/`y` place the baseline, `font-size` sets the size (capitals are 0.7 of
+it), and `text-anchor` / `dominant-baseline` centre it, so labels can sit inside boxes. Images,
+styles and rounded corners (`rx`) are not drawn; images and other unsupported elements give a
+warning. A drawing takes `pen` for its shapes (default normal) and `text_pen` for its labels (default
+thin).
 
 ## Spec
 
@@ -128,6 +148,45 @@ These use the operations the Kindle's own folder UI emits: `CreateFolder` and
 Rehearsed 2026-11-08 against a scratch copy of the live ledger: moving five notebooks into two new
 folders, sending a note into an existing folder named in another case, and moving notebooks back to
 the top level changed only folder membership.
+
+## Adding to existing pages (annotate) and undo (delete-ink)
+
+```bash
+ignite-import annotate add.json --notebook <index|id> --page N --server URL --token-file F --state-dir D [--preview-dir P]
+ignite-import annotate add.json --notebook <index|id> --page N --server URL --token-file F --state-dir D --confirm-write --json
+ignite-import delete-ink --last --server URL --token-file F --state-dir D --confirm-write
+ignite-import delete-ink <strokeId|textId>... --server URL --token-file F --state-dir D --confirm-write
+```
+
+`add.json` is one page of the spec without `paper` (`shapes`, `strokes`, `labels`, `writing`,
+`drawings`, `texts`, optional `coords`). It is appended to page N as `AddStroke`/`AddText`; nothing
+already on the page changes. With `"new_page": { "link_from": [x, y] }` the additions go on a new
+page inserted right after page N instead (same paper), with a link icon at `[x, y]` on page N and
+one back in the new page's top-right corner (`"new_page": {}` for no links).
+
+Without `--confirm-write` nothing is sent. `--preview-dir P` writes `additions.svg` (only the new
+ink) and `additions.json` (`page_id`, plus the planned `strokes` and `texts` in snapshot form, pens
+included), so a caller can render the page as it will look before writing. The JSON report lists
+the new `strokeIds`, `textIds` and `linkIds`, and `warnings` for SVG elements that were not drawn.
+
+### Measuring handwriting first (measure)
+
+```bash
+ignite-import measure items.json
+```
+
+`items.json` is `[{ "text", "size"?, "width"? }]` in page-width units (`size` defaults to the
+`writing` default, `width` wraps words). The answer is `{ "ok": true, "sizes": [{ "w", "h" }] }`,
+one per item, `h` measured from the top of the capitals to the lowest descender, so a script can
+find free space on a page before calling `annotate`. Nothing is contacted; characters the
+handwriting font lacks are an error.
+
+Every write is appended to `<state-dir>/ai-ink.jsonl` (ids, page, server head). `delete-ink`
+removes only ids listed there (`DeleteStrokeLineage` / `DeleteText`), so ink you wrote yourself
+can never be removed by it; a request containing any other id is refused as a whole. Strokes you
+partly erased on the Kindle are removed completely (every fragment of the lineage). Use one
+`--state-dir` per writer so its ink can be told apart by replica. On the Kindle the eraser removes
+annotate's ink like your own, but **not typed `texts`**: remove those with `delete-ink`.
 
 ## Safe area (chrome bands)
 

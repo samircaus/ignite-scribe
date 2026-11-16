@@ -73,6 +73,73 @@ pub struct PageIn {
     /// Text objects. Display-only on the Kindle (editable in ignite-web), default sans face.
     #[serde(default)]
     pub texts: Vec<TextIn>,
+    /// Handwriting (lowercase, wrapped), drawn as ink with [`crate::hand`].
+    #[serde(default)]
+    pub writing: Vec<WritingIn>,
+    /// SVG drawings (a small subset, see [`crate::svg`]), drawn as ink outlines.
+    #[serde(default)]
+    pub drawings: Vec<DrawingIn>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WritingIn {
+    pub text: String,
+    /// Top-left of the first line's capitals.
+    pub x: f32,
+    pub y: f32,
+    /// Capital height (lowercase x-height is 0.6 of it), in the spec's coordinate units.
+    /// Absent = [`WRITING_SIZE`], the size chosen on the Kindle for generated writing.
+    #[serde(default)]
+    pub size: Option<f32>,
+    /// Wrap width. Absent = one line per `\n`-separated paragraph.
+    #[serde(default)]
+    pub width: Option<f32>,
+    /// Line width (default thin, chosen on the Kindle for generated writing).
+    #[serde(default = "thin")]
+    pub pen: Pen,
+}
+
+/// Default writing capital height in page widths (0.017 ≈ 2.7 mm on a Scribe), picked from a
+/// size ladder on the device (2026-11-15) together with the thin pen.
+pub const WRITING_SIZE: f32 = 0.017;
+
+fn thin() -> Pen {
+    Pen::Thin
+}
+
+/// Line width of generated ink, mapped onto the Kindle's pen widths (radius 1–4 panel px).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Pen {
+    /// Radius 1: half the normal line, for small writing and labels.
+    Thin,
+    /// Radius 2: the fixed width of ordinary ink.
+    #[default]
+    Normal,
+    /// Radius 3: for headings and emphasis.
+    Bold,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DrawingIn {
+    /// A complete `<svg>` document.
+    pub svg: String,
+    /// Top-left of the drawing's box.
+    pub x: f32,
+    pub y: f32,
+    /// The drawing is scaled to this width, keeping its aspect ratio …
+    pub width: f32,
+    /// … and to at most this height, if given.
+    #[serde(default)]
+    pub height: Option<f32>,
+    /// Line width of the shapes.
+    #[serde(default)]
+    pub pen: Pen,
+    /// Line width of `<text>` labels (default thin, like writing).
+    #[serde(default = "thin")]
+    pub text_pen: Pen,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]

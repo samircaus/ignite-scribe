@@ -35,6 +35,25 @@ ignite-import copy-pages <index|id> --pages 1-4 --into <index|id> [--before N] -
   copy-pages copies pages verbatim (every stroke point and pressure, typed text) into another
   notebook, before its page N (default: at the end). The source notebook is not changed.
 
+ignite-import annotate <add.json> --notebook <index|id> --page N --server URL --token-file FILE
+              --state-dir DIR [--preview-dir DIR] [--confirm-write]
+
+  annotate adds ink and typed text (one page of the spec: shapes, strokes, labels, writing,
+  drawings, texts) to page N (1-based) of an existing notebook, or with new_page to a new page
+  inserted right after it. Nothing already there is changed; --json reports the new ids, and
+  every write is recorded in <state-dir>/ai-ink.jsonl.
+
+ignite-import delete-ink <id>... | --last --server URL --token-file FILE --state-dir DIR
+              [--confirm-write]
+
+  delete-ink removes strokes/text that annotate wrote (ids from its report, or --last for the
+  most recent annotate). Ids not in the journal are refused, so your own ink is never removed.
+
+ignite-import measure <items.json>
+
+  measure prints the size of handwriting before it is placed: items are
+  [{ \"text\", \"size\"?, \"width\"? }] in page-width units, the answer lists { \"w\", \"h\" } each.
+
 ignite-import move-notebook <index|id>... (--folder NAME | --top-level) --server URL
               --token-file FILE --state-dir DIR [--confirm-write]
 
@@ -189,6 +208,182 @@ fn manage_cmd(args: &[String]) -> Result<Out, String> {
         } else {
             format!("deleted {what}\nThe Kindle applies the deletion on its next sync pull; deleted items are quarantined on the device, not erased.\n")
         },
+    })
+}
+
+/// `annotate <add.json> --notebook <index|id> --page N`.
+fn annotate_cmd(args: &[String]) -> Result<Out, String> {
+    use ignite_import::annotate::{append_journal, plan_annotate, AnnotateSpec, JournalEntry};
+    use ignite_import::client::fetch_snapshot;
+
+    let path = args
+        .get(1)
+        .filter(|a| !a.starts_with("--"))
+        .ok_or("annotate needs a JSON file with the additions")?;
+    let add = AnnotateSpec::parse(&std::fs::read(path).map_err(|e| format!("{path}: {e}"))?)?;
+    let sel = opt(args, "--notebook").ok_or("annotate needs --notebook <index|id>")?;
+    let page = match opt(args, "--page").map(|n| n.parse::<usize>()) {
+        Some(Ok(n)) if n >= 1 => n - 1,
+        _ => return Err("annotate needs --page N (1-based)".into()),
+    };
+    let url = opt(args, "--server").ok_or("--server is required")?;
+    let http = Http::new(&url, token(args)?)?;
+    let library = discover_library(&http, opt(args, "--library").as_deref())?;
+    let snap = fetch_snapshot(&http, library)?;
+    let write = flag(args, "--confirm-write");
+    let mut mint = || Uuid::now_v7();
+    let mut replica = match (opt(args, "--state-dir"), write) {
+        (Some(d), _) => ReplicaFile::load_or_create(Path::new(&d), library, &mut mint)?,
+        (None, true) => return Err("--confirm-write needs --state-dir".into()),
+        (None, false) => ReplicaFile::load_or_create(
+            &std::env::temp_dir().join("ignite-import-preview"),
+            library,
+            &mut mint,
+        )?,
+    };
+    let ids = Ids {
+        library_id: library,
+        replica_id: replica.replica_id,
+        first_client_seq: replica.next_client_seq,
+    };
+    let (plan, added, what) = plan_annotate(&snap, &sel, page, &add, &ids, &mut mint)?;
+    if let Some(dir) = opt(args, "--preview-dir") {
+        // Only the additions (the page's own ink is not drawn).
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
+        let f = Path::new(&dir).join("additions.svg");
+        std::fs::write(&f, page_svg(&plan.pages[0]))
+            .map_err(|e| format!("{}: {e}", f.display()))?;
+        // The planned strokes and texts in snapshot form (pens included), so a caller can
+        // render the page as it will look: its current ink plus these.
+        let mut strokes = Vec::new();
+        let mut texts = Vec::new();
+        for env in &plan.envelopes {
+            match &env.operation {
+                SyncOperationV1::AddStroke { stroke, .. } => strokes.push(stroke),
+                SyncOperationV1::AddText { text, .. } => texts.push(text),
+                _ => {}
+            }
+        }
+        let f = Path::new(&dir).join("additions.json");
+        let body =
+            json!({ "page_id": added.page_id.to_string(), "strokes": strokes, "texts": texts });
+        std::fs::write(&f, body.to_string()).map_err(|e| format!("{}: {e}", f.display()))?;
+    }
+    let mut report = json!({
+        "ok": true, "command": "annotate", "library": library.to_string(),
+        "notebook": { "id": plan.notebook_id.to_string(), "title": added.notebook_title },
+        "page": { "index": page + 1, "id": added.page_id },
+        "description": what, "envelopes": plan.envelopes.len(), "written": false,
+        "replicaId": replica.replica_id.to_string(),
+        "pageId": added.page_id, "createdPageId": added.created_page_id,
+        "strokeIds": added.stroke_ids, "textIds": added.text_ids, "linkIds": added.link_ids,
+        "warnings": plan.warnings
+    });
+    if !write {
+        return Ok(Out {
+            report,
+            text: format!("would {what}\n{} operations; nothing was sent (pass --confirm-write and --state-dir to write)\n", plan.envelopes.len()),
+        });
+    }
+    let res = submit(&http, &plan, &mut replica, &mut |_| {})?;
+    let dir = PathBuf::from(opt(args, "--state-dir").unwrap_or_default());
+    append_journal(
+        &dir,
+        &JournalEntry {
+            at: now_rfc3339(),
+            notebook_id: added.notebook_id.clone(),
+            page_id: added.page_id.clone(),
+            created_page_id: added.created_page_id.clone(),
+            stroke_ids: added.stroke_ids.clone(),
+            text_ids: added.text_ids.clone(),
+            link_ids: added.link_ids.clone(),
+            head_server_seq: res.head_server_seq,
+        },
+    )?;
+    report["written"] = json!(true);
+    report["headServerSeq"] = json!(res.head_server_seq);
+    Ok(Out {
+        report,
+        text: format!("done: {what}\nThe Kindle receives it on its next sync pull.\n"),
+    })
+}
+
+/// Seconds since the epoch as an RFC 3339 UTC timestamp (no date crate needed).
+fn now_rfc3339() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
+/// `delete-ink <id>... | --last` : remove ink this importer wrote (journal-checked).
+fn delete_ink_cmd(args: &[String]) -> Result<Out, String> {
+    use ignite_import::annotate::{plan_delete_ink, read_journal};
+    use ignite_import::client::fetch_snapshot;
+
+    let dir = PathBuf::from(
+        opt(args, "--state-dir")
+            .ok_or("delete-ink needs --state-dir (its journal lists the ink it may remove)")?,
+    );
+    let journal = read_journal(&dir)?;
+    let mut wanted: Vec<String> = args[1..]
+        .iter()
+        .take_while(|a| !a.starts_with("--"))
+        .cloned()
+        .collect();
+    if flag(args, "--last") {
+        let last = journal
+            .last()
+            .ok_or("the journal is empty: nothing to undo")?;
+        wanted.extend(last.stroke_ids.iter().cloned());
+        wanted.extend(last.text_ids.iter().cloned());
+    }
+    let url = opt(args, "--server").ok_or("--server is required")?;
+    let http = Http::new(&url, token(args)?)?;
+    let library = discover_library(&http, opt(args, "--library").as_deref())?;
+    let snap = fetch_snapshot(&http, library)?;
+    let mut mint = || Uuid::now_v7();
+    let mut replica = ReplicaFile::load_or_create(&dir, library, &mut mint)?;
+    let ids = Ids {
+        library_id: library,
+        replica_id: replica.replica_id,
+        first_client_seq: replica.next_client_seq,
+    };
+    let (plan, removal, what) = plan_delete_ink(&snap, &journal, &wanted, &ids, &mut mint)?;
+    let mut report = json!({
+        "ok": true, "command": "delete-ink", "library": library.to_string(),
+        "description": what, "envelopes": plan.envelopes.len(), "written": false,
+        "strokes": removal.strokes, "texts": removal.texts, "alreadyGone": removal.already_gone
+    });
+    if !flag(args, "--confirm-write") || plan.envelopes.is_empty() {
+        return Ok(Out {
+            report,
+            text: format!("would {what}\nnothing was sent (pass --confirm-write to remove)\n"),
+        });
+    }
+    let res = submit(&http, &plan, &mut replica, &mut |_| {})?;
+    report["written"] = json!(true);
+    report["headServerSeq"] = json!(res.head_server_seq);
+    Ok(Out {
+        report,
+        text: format!("done: {what}\nThe Kindle applies it on its next sync pull.\n"),
     })
 }
 
@@ -568,11 +763,54 @@ fn spec_json(spec: &Spec) -> String {
     .unwrap()
 }
 
+/// `measure <items.json>`: size of handwriting before placing it. Items are
+/// `[{ "text", "size"?, "width"? }]` in page-width units; the answer lists `{ "w", "h" }` for each
+/// (h from the top of the capitals to the lowest descender). Nothing is contacted.
+fn measure_cmd(args: &[String]) -> Result<Out, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Item {
+        text: String,
+        #[serde(default)]
+        size: Option<f32>,
+        #[serde(default)]
+        width: Option<f32>,
+    }
+    let path = args
+        .get(1)
+        .filter(|a| !a.starts_with("--"))
+        .ok_or("measure needs <items.json>")?;
+    let raw = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    let items: Vec<Item> = serde_json::from_slice(&raw).map_err(|e| format!("{path}: {e}"))?;
+    let mut sizes = Vec::new();
+    for (i, it) in items.iter().enumerate() {
+        let missing = ignite_import::hand::missing(&it.text);
+        if !missing.is_empty() {
+            let list: String = missing.iter().collect();
+            return Err(format!(
+                "item {}: the handwriting font lacks {list:?}",
+                i + 1
+            ));
+        }
+        let size = it.size.unwrap_or(ignite_import::spec::WRITING_SIZE);
+        let (w, h) = ignite_import::hand::measure(&it.text, size, it.width);
+        sizes.push(json!({ "w": w, "h": h }));
+    }
+    let report = json!({ "ok": true, "command": "measure", "sizes": sizes });
+    Ok(Out {
+        text: format!("{report}\n"),
+        report,
+    })
+}
+
 fn run(args: &[String]) -> Result<Out, String> {
     match args.first().map(String::as_str) {
         Some("list" | "delete-notebook" | "delete-page" | "copy-pages") => return manage_cmd(args),
         Some("note") => return note_cmd(args),
         Some("move-notebook") => return move_cmd(args),
+        Some("annotate") => return annotate_cmd(args),
+        Some("delete-ink") => return delete_ink_cmd(args),
+        Some("measure") => return measure_cmd(args),
         _ => {}
     }
     let spec_path = args

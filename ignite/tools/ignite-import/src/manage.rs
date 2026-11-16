@@ -99,6 +99,7 @@ fn plan_of(notebook_id: NotebookId, envelopes: Vec<SyncEnvelopeV1>) -> Plan {
         envelopes,
         blobs: Vec::new(),
         pages: Vec::new(),
+        warnings: Vec::new(),
     }
 }
 
